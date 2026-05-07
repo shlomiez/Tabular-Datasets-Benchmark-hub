@@ -8,3 +8,6 @@ featselectlib
 lifelines
 tabicl
 tqdm
+PyYAML
+h5py
+torchvision

@@ -85,6 +85,9 @@ def run_pipeline(base_dir: Path | None = None, config: ExperimentConfig | None =
             lspin_lambda_values=dataset_lambda_ranges["lspin"],
             evaluation_mode=config.evaluation_mode,
             prediction_model_type=config.prediction_model_type,
+            use_peeling=config.use_peeling,
+            peeling_tau=config.peeling_tau,
+            peeling_low_auc_threshold=config.peeling_low_auc_threshold,
         )
 
         summary_tables[dataset_name] = summary_df
@@ -135,6 +138,7 @@ def run_pipeline(base_dir: Path | None = None, config: ExperimentConfig | None =
     print(f"- {output_dir / 'hyperparameters.yaml'}")
 
     return {
+        "output_dir": output_dir,
         "summary_csv": summary_csv,
         "fold_csv": fold_csv,
         "loss_csv": loss_csv,

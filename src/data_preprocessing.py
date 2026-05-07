@@ -117,3 +117,4 @@ def prepare_fold_arrays(X_train: np.ndarray, X_test: np.ndarray) -> tuple[np.nda
         X_test_scaled = X_test_scaled.toarray()
 
     return np.asarray(X_train_scaled, dtype=np.float32), np.asarray(X_test_scaled, dtype=np.float32)
+

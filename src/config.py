@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +31,9 @@ class PathConfig:
 class ExperimentConfig:
     """Top-level experiment controls."""
 
+    use_peeling: bool = False
+    peeling_tau: int = 50
+    peeling_low_auc_threshold: float = 0.70
     seed: int = 42
     n_splits: int = 5
     feature_selection_method: str = "lamda_tuning"
@@ -72,10 +76,12 @@ def resolve_paths(base_dir: Path | None = None) -> PathConfig:
         else (project_base_dir / "data").resolve()
     )
 
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    
     output_root = (
         Path(env_output_dir).expanduser().resolve()
         if env_output_dir
-        else (project_base_dir / "output").resolve()
+        else (project_base_dir / "output" / timestamp).resolve()
     )
 
     ensure_dir(output_root)

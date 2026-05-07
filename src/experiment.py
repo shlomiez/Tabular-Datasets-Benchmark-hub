@@ -158,10 +158,22 @@ def run_fold_experiment(
     run_stg: bool = True,
     run_lspin: bool = True,
     evaluation_mode: str = "full",
+    use_peeling: bool = False,
+    peeling_tau: int = 50,
+    peeling_low_auc_threshold: float = 0.70,
 ) -> dict[str, Any]:
     """Run one CV fold across baseline and optional feature selectors."""
     if evaluation_mode not in {"full", "selector_only"}:
         raise ValueError("evaluation_mode must be either 'full' or 'selector_only'.")
+
+    if use_peeling:
+        from src.peeling import peeling_procedure
+        X_train, y_train, peeling_status = peeling_procedure(
+            X_train, y_train, X_test, y_test,
+            tau=peeling_tau,
+            low_auc_threshold=peeling_low_auc_threshold,
+            random_state=random_state
+        )
 
     X_train_scaled, X_test_scaled = prepare_fold_arrays(X_train, X_test)
 
@@ -376,6 +388,9 @@ def run_dataset_experiment(
     lspin_lambda_values: list[float] | None = None,
     evaluation_mode: str = "full",
     prediction_model_type: str = "etree",
+    use_peeling: bool = False,
+    peeling_tau: int = 50,
+    peeling_low_auc_threshold: float = 0.70,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Run full CV experiment for one dataset."""
     set_global_seed(random_state)
@@ -476,6 +491,9 @@ def run_dataset_experiment(
                 run_lspin=lspin_enabled,
                 evaluation_mode=evaluation_mode,
                 prediction_model_type=prediction_model_type,
+                use_peeling=use_peeling,
+                peeling_tau=peeling_tau,
+                peeling_low_auc_threshold=peeling_low_auc_threshold,
             )
             fold_rows.append(row)
             save_checkpoint(output_dir, dataset_name, pd.DataFrame(fold_rows))

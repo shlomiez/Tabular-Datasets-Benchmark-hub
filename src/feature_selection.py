@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+project_root = Path(__file__).resolve().parent.parent
+featselectlib_path = project_root / "project-featselectlib"
+if str(featselectlib_path) not in sys.path:
+    sys.path.insert(0, str(featselectlib_path))
+
 from typing import Any, Sequence
 
 import numpy as np
