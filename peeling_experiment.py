@@ -40,6 +40,7 @@ def evaluate_etree_configs(X_tr, y_tr, X_te, y_te, seed=42):
 
 def run_peeling_experiment(X, y, dataset_name, seed=42, tau=50, low_auc_threshold=0.70):
     print(f"\n--- Running Peeling Experiment on {dataset_name} ---")
+    print(f"Initial dataset size: {X.shape[0]} samples, {X.shape[1]} features")
     y, _ = encode_labels(y)
     
     # Step 1: Initial Split
@@ -53,13 +54,13 @@ def run_peeling_experiment(X, y, dataset_name, seed=42, tau=50, low_auc_threshol
         print(f"Warning: Initial AUC {auc_initial:.4f} is <= {low_auc_threshold}. Expected > {low_auc_threshold}.")
         
     # Step 2: Ground Truth Recovery
-    k_features = min(60, X_train.shape[1])
+    k_features = min(30, X_train.shape[1])
     selector = SelectKBest(mutual_info_classif, k=k_features)
     selector.fit(X_train, y_train)
     F_best = selector.get_support(indices=True)
     
     auc_gt_initial, _, _ = evaluate_etree_configs(X_train[:, F_best], y_train, X_test[:, F_best], y_test, seed=seed)
-    print(f"Step 2: Ground Truth AUC (Initial Dataset): {auc_gt_initial:.4f}")
+    print(f"Step 2: Ground Truth AUC (Initial Dataset): {auc_gt_initial:.4f} with {len(F_best)} features")
     
     # Step 3: The Peeling Loop
     print("Step 3: Executing Peeling Loop...")
@@ -165,7 +166,7 @@ def main():
             
     if results:
         df_results = pd.DataFrame(results)
-        date_and_time = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+        date_and_time = pd.Timestamp.now().strftime("%Y-%m-%d_%H:%M:%S")
         output_dir = Path("output")
         output_dir.mkdir(exist_ok=True)
         csv_path = output_dir / f"peeling_experiment_results_{date_and_time}.csv"
