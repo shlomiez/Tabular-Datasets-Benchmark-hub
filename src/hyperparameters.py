@@ -85,7 +85,7 @@ def get_hyperparameters(dataset_name: str, n_train_samples: int) -> tuple[dict[s
             "Expected one of: Breast, colon, leukemia, SMK-CAN-187, madelon, RELATHE."
         )
 
-    etree_params = {"n_estimators": 200, "max_depth": 4}
+    etree_params = {"n_estimators": 100, "max_depth": 2}
     return stg_params, lspin_params, etree_params
 
 def output_hyperparameters_to_yaml(path: Path, stg_params: dict[str, Any], lspin_params: dict[str, Any], etree_params: dict[str, Any]) -> None:

@@ -8,140 +8,179 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+# Visual settings for publication quality
+lw = 3      # line width
+ms = 8      # marker size
+fs_title = 16
+fs_label = 14
+fs_tick = 12
+fs_legend = 11
 
-def plot_and_save_loss_curve(
-    loss_df: pd.DataFrame,
-    dataset_name: str,
-    plots_dir: Path,
-    title: str | None = None,
-) -> None:
-    """Save average STG/LSPIN training-loss curve for one dataset."""
-    if loss_df.empty:
-        print(f"Loss history is missing for {dataset_name}; skipped loss plot.")
+def plot_auc_and_accuracy(dataset_name, part, x_stg, x_lspin, x_base, has_train, x_label, x_scale, plots_dir, suffix):
+    """Generate and save AUC and Accuracy plots."""
+    fig_metrics, axes_metrics = plt.subplots(1, 2, figsize=(16, 6))
+
+    # AUC Plot
+    if has_train:
+        axes_metrics[0].plot(x_base, part["baseline_train_auc_mean"], marker="o", linestyle="-", linewidth=lw, markersize=ms, color="tab:green", label="Train - Baseline")
+        axes_metrics[0].plot(x_stg, part["stg_train_auc_mean"], marker="s", linestyle="-", linewidth=lw, markersize=ms, color="tab:orange", label="Train - STG")
+        axes_metrics[0].plot(x_lspin, part["lspin_train_auc_mean"], marker="^", linestyle="-", linewidth=lw, markersize=ms, color="tab:blue", label="Train - LSPIN")
+        
+    axes_metrics[0].plot(x_base, part["baseline_auc_mean"], marker="o", linestyle="--", linewidth=lw, markersize=ms, color="tab:green", label="Test - Baseline")
+    axes_metrics[0].plot(x_stg, part["stg_auc_mean"], marker="s", linestyle="--", linewidth=lw, markersize=ms, color="tab:orange", label="Test - STG")
+    axes_metrics[0].plot(x_lspin, part["lspin_auc_mean"], marker="^", linestyle="--", linewidth=lw, markersize=ms, color="tab:blue", label="Test - LSPIN")
+    
+    axes_metrics[0].set_title(f"{dataset_name}: AUC", fontsize=fs_title, fontweight='bold')
+    axes_metrics[0].set_xlabel(x_label, fontsize=fs_label, fontweight='bold')
+    axes_metrics[0].set_ylabel("AUC", fontsize=fs_label, fontweight='bold')
+    axes_metrics[0].set_xscale(x_scale)
+    axes_metrics[0].grid(True, alpha=0.3)
+    axes_metrics[0].tick_params(axis='both', labelsize=fs_tick)
+    axes_metrics[0].legend(fontsize=fs_legend, loc="best")
+
+    # Accuracy Plot
+    if has_train:
+        axes_metrics[1].plot(x_base, part["baseline_train_accuracy_mean"], marker="o", linestyle="-", linewidth=lw, markersize=ms, color="tab:green", label="Train - Baseline")
+        axes_metrics[1].plot(x_stg, part["stg_train_accuracy_mean"], marker="s", linestyle="-", linewidth=lw, markersize=ms, color="tab:orange", label="Train - STG")
+        axes_metrics[1].plot(x_lspin, part["lspin_train_accuracy_mean"], marker="^", linestyle="-", linewidth=lw, markersize=ms, color="tab:blue", label="Train - LSPIN")
+        
+    axes_metrics[1].plot(x_base, part["baseline_accuracy_mean"], marker="o", linestyle="--", linewidth=lw, markersize=ms, color="tab:green", label="Test - Baseline")
+    axes_metrics[1].plot(x_stg, part["stg_accuracy_mean"], marker="s", linestyle="--", linewidth=lw, markersize=ms, color="tab:orange", label="Test - STG")
+    axes_metrics[1].plot(x_lspin, part["lspin_accuracy_mean"], marker="^", linestyle="--", linewidth=lw, markersize=ms, color="tab:blue", label="Test - LSPIN")
+    
+    axes_metrics[1].set_title(f"{dataset_name}: Accuracy", fontsize=fs_title, fontweight='bold')
+    axes_metrics[1].set_xlabel(x_label, fontsize=fs_label, fontweight='bold')
+    axes_metrics[1].set_ylabel("Accuracy", fontsize=fs_label, fontweight='bold')
+    axes_metrics[1].set_xscale(x_scale)
+    axes_metrics[1].grid(True, alpha=0.3)
+    axes_metrics[1].tick_params(axis='both', labelsize=fs_tick)
+    axes_metrics[1].legend(fontsize=fs_legend, loc="best")
+
+    fig_metrics.tight_layout()
+    metrics_plot_path = plots_dir / f"{dataset_name}_metrics_curves_{suffix}.png"
+    fig_metrics.savefig(metrics_plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig_metrics)
+
+
+def plot_loss_curves(dataset_name, loss_part, plots_dir, suffix):
+    """Generate and save loss curves plot."""
+    if loss_part.empty:
         return
-
+        
     loss_summary = (
-        loss_df.groupby(["algorithm", "epoch"], as_index=False)["train_loss"]
+        loss_part.groupby(["algorithm", "epoch"], as_index=False)["train_loss"]
         .mean()
         .sort_values(["algorithm", "epoch"])
     )
-
     fig_loss, ax_loss = plt.subplots(figsize=(10, 5))
-    color_by_algorithm = {"STG": "tab:orange", "LSPIN": "tab:blue"}
     for algorithm_name, algo_part in loss_summary.groupby("algorithm"):
+        color = "tab:orange" if algorithm_name == "STG" else "tab:blue"
+        marker = "s" if algorithm_name == "STG" else "^"
         ax_loss.plot(
             algo_part["epoch"],
             algo_part["train_loss"],
-            marker="o",
-            linewidth=2,
-            color=color_by_algorithm.get(algorithm_name),
+            marker=marker,
+            markevery=max(1, len(algo_part)//20),
+            linewidth=lw,
+            markersize=ms,
+            color=color,
             label=algorithm_name,
         )
-
-    ax_loss.set_title(title or f"{dataset_name}: Train Loss vs Epoch")
-    ax_loss.set_xlabel("Epoch")
-    ax_loss.set_ylabel("Train loss")
+    ax_loss.set_title(f"{dataset_name}: Train Loss vs Epoch", fontsize=fs_title, fontweight='bold')
+    ax_loss.set_xlabel("Epoch", fontsize=fs_label, fontweight='bold')
+    ax_loss.set_ylabel("Train loss (MSE)", fontsize=fs_label, fontweight='bold')
+    ax_loss.tick_params(axis='both', labelsize=fs_tick)
     ax_loss.grid(True, alpha=0.3)
-    ax_loss.legend()
+    ax_loss.legend(fontsize=fs_legend)
     fig_loss.tight_layout()
 
-    loss_plot_path = plots_dir / f"{dataset_name}_train_loss_curve.png"
+    loss_plot_path = plots_dir / f"{dataset_name}_train_loss_curve_{suffix}.png"
     fig_loss.savefig(loss_plot_path, dpi=150, bbox_inches="tight")
-    print(f"Saved loss plot for {dataset_name}: {loss_plot_path}")
     plt.close(fig_loss)
 
 
-def plot_and_save_lambda_feature_count_curve(
-    summary_df: pd.DataFrame,
-    dataset_name: str,
-    plots_dir: Path,
-) -> None:
-    """Save selected-features vs lambda chart with dual STG/LSPIN lambda labels."""
-    if summary_df.empty or "lambda_value" not in summary_df.columns:
-        print(f"Lambda summary is missing for {dataset_name}; skipped lambda feature-count plot.")
+def plot_lambda_tuning_features(dataset_name, part, plots_dir):
+    """Generate and save selected features vs lambda plot."""
+    stg_lambdas = part["lambda_value"]
+    lspin_lambdas = part.get("lspin_lambda_value", part["lambda_value"])
+    
+    # Selected Features Plot
+    fig_sel, axes_sel = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # STG
+    axes_sel[0].plot(stg_lambdas, part["stg_selected_features_mean"], marker="s", linewidth=lw, markersize=ms, color="tab:orange", label="STG")
+    axes_sel[0].set_title(f"{dataset_name}: STG Selected Features", fontsize=fs_title, fontweight='bold')
+    axes_sel[0].set_xlabel(r"$\lambda$ (STG)", fontsize=fs_label, fontweight='bold')
+    axes_sel[0].set_ylabel("Number of Selected Features", fontsize=fs_label, fontweight='bold')
+    axes_sel[0].set_xscale('log')
+    axes_sel[0].tick_params(axis='both', labelsize=fs_tick)
+    axes_sel[0].grid(True, alpha=0.3)
+    axes_sel[0].legend(fontsize=fs_legend)
+
+    # LSPIN
+    axes_sel[1].plot(lspin_lambdas, part["lspin_selected_features_mean"], marker="^", linewidth=lw, markersize=ms, color="tab:blue", label="LSPIN")
+    axes_sel[1].set_title(f"{dataset_name}: LSPIN Selected Features", fontsize=fs_title, fontweight='bold')
+    axes_sel[1].set_xlabel(r"$\lambda$ (LSPIN)", fontsize=fs_label, fontweight='bold')
+    axes_sel[1].set_ylabel("Number of Selected Features", fontsize=fs_label, fontweight='bold')
+    axes_sel[1].set_xscale('log')
+    axes_sel[1].tick_params(axis='both', labelsize=fs_tick)
+    axes_sel[1].grid(True, alpha=0.3)
+    axes_sel[1].legend(fontsize=fs_legend)
+
+    fig_sel.tight_layout()
+    sel_plot_path = plots_dir / f"{dataset_name}_lambda_selected_features_summary.png"
+    fig_sel.savefig(sel_plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig_sel)
+
+
+def plot_metrics(dataset_name: str, summary_df: pd.DataFrame, loss_df: pd.DataFrame, config, plots_dir: Path) -> None:
+    """Helper to structure data and call plotting functions based on configuration."""
+    if summary_df.empty:
         return
 
-    part = summary_df[summary_df["dataset"] == dataset_name].copy()
-    part = part[part["feature_selection_method"] == "lamda_tuning"].sort_values("lambda_value")
-    if part.empty:
-        print(f"No lambda-tuning rows for {dataset_name}; skipped lambda feature-count plot.")
-        return
+    if config.feature_selection_method == "features_ratio":
+        sort_col = "feature_ratio"
+        x_label = "Retained features ratio (k/p)"
+        x_scale = "linear"
+        suffix = "feature_ratio"
+    else:
+        sort_col = "lambda_value"
+        x_label = "Number of Selected Features (Gate > 0)"
+        x_scale = "linear"
+        suffix = "num_features"
 
-    x_positions = np.arange(len(part))
-    stg_labels = [f"{v:.3g}" for v in part["lambda_value"].to_numpy()]
-    lspin_labels = [f"{v:.3g}" for v in part.get("lspin_lambda_value", part["lambda_value"]).to_numpy()]
+    if sort_col in summary_df.columns:
+        plot_df = summary_df.sort_values(sort_col)
+    else:
+        plot_df = summary_df.copy()
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(x_positions, part["lspin_selected_features_mean"], marker="o", linewidth=2, color="tab:blue", label="LSPIN")
-    ax.plot(x_positions, part["stg_selected_features_mean"], marker="o", linewidth=2, color="tab:orange", label="STG")
-    ax.set_xlabel("STG lambda")
-    ax.set_ylabel("Number of Selected Features (Gate > 0)")
-    ax.set_title(f"{dataset_name}: Selected Features vs Lambda")
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(stg_labels, rotation=30, ha="right")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
+    if config.feature_selection_method == "features_ratio":
+        x_stg = plot_df["feature_ratio"]
+        x_lspin = plot_df["feature_ratio"]
+        x_base = plot_df["feature_ratio"]
+    else:
+        x_stg = plot_df["stg_selected_features_mean"]
+        x_lspin = plot_df["lspin_selected_features_mean"]
+        x_base = plot_df["stg_selected_features_mean"]
 
-    ax_top = ax.twiny()
-    ax_top.set_xlim(ax.get_xlim())
-    ax_top.set_xticks(x_positions)
-    ax_top.set_xticklabels(lspin_labels, rotation=30, ha="left")
-    ax_top.set_xlabel("LSPIN lambda")
+    train_cols = {
+        "baseline_train_auc_mean", "stg_train_auc_mean", "lspin_train_auc_mean",
+        "baseline_train_accuracy_mean", "stg_train_accuracy_mean", "lspin_train_accuracy_mean",
+    }
+    has_train = train_cols.issubset(plot_df.columns)
 
-    fig.tight_layout()
+    # 1. AUC and Accuracy
+    plot_auc_and_accuracy(
+        dataset_name, plot_df, x_stg, x_lspin, x_base, has_train, 
+        x_label, x_scale, plots_dir, suffix
+    )
 
-    out_path = plots_dir / f"{dataset_name}_lambda_selected_features.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    print(f"Saved lambda feature-count plot for {dataset_name}: {out_path}")
-    plt.close(fig)
+    # 2. Loss Curves
+    if not loss_df.empty:
+        plot_loss_curves(dataset_name, loss_df, plots_dir, suffix)
+
+    # 3. Lambda Tuning Features
+    if config.feature_selection_method in ["lamda_tuning", "lambda_tuning"]:
+        plot_lambda_tuning_features(dataset_name, plot_df, plots_dir)
 
 
-def plot_and_save_lambda_ignored_feature_count_curve(
-    summary_df: pd.DataFrame,
-    dataset_name: str,
-    plots_dir: Path,
-) -> None:
-    """Save ignored-features vs lambda chart with dual STG/LSPIN lambda labels."""
-    if summary_df.empty or "lambda_value" not in summary_df.columns:
-        print(f"Lambda summary is missing for {dataset_name}; skipped lambda ignored-feature plot.")
-        return
-
-    part = summary_df[summary_df["dataset"] == dataset_name].copy()
-    part = part[part["feature_selection_method"] == "lamda_tuning"].sort_values("lambda_value")
-    if part.empty:
-        print(f"No lambda-tuning rows for {dataset_name}; skipped lambda ignored-feature plot.")
-        return
-
-    p_values = part["p"].to_numpy(dtype=float)
-    stg_selected = part["stg_selected_features_mean"].to_numpy(dtype=float)
-    lspin_selected = part["lspin_selected_features_mean"].to_numpy(dtype=float)
-    stg_ignored = p_values - stg_selected
-    lspin_ignored = p_values - lspin_selected
-
-    x_positions = np.arange(len(part))
-    stg_labels = [f"{v:.3g}" for v in part["lambda_value"].to_numpy()]
-    lspin_labels = [f"{v:.3g}" for v in part.get("lspin_lambda_value", part["lambda_value"]).to_numpy()]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(x_positions, lspin_ignored, marker="o", linewidth=2, color="tab:blue", label="LSPIN")
-    ax.plot(x_positions, stg_ignored, marker="o", linewidth=2, color="tab:orange", label="STG")
-    ax.set_xlabel("STG lambda")
-    ax.set_ylabel("Number of Ignored Features")
-    ax.set_title(f"{dataset_name}: Ignored Features vs Lambda")
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(stg_labels, rotation=30, ha="right")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-
-    ax_top = ax.twiny()
-    ax_top.set_xlim(ax.get_xlim())
-    ax_top.set_xticks(x_positions)
-    ax_top.set_xticklabels(lspin_labels, rotation=30, ha="left")
-    ax_top.set_xlabel("LSPIN lambda")
-
-    fig.tight_layout()
-
-    out_path = plots_dir / f"{dataset_name}_lambda_ignored_features.png"
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    print(f"Saved lambda ignored-feature plot for {dataset_name}: {out_path}")
-    plt.close(fig)

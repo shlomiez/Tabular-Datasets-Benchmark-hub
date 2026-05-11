@@ -19,7 +19,12 @@ evaluation_mode: full
 
 # Datasets to run, e.g. ["RELATHE", "madelon"]
 dataset_names:
-  - RELATHE
+  - Breast
+  # - madelon
+  # - colon
+  # - SMK-CAN-187
+  # # - RELATHE
+  # - leukemia
 
 # Feature ratios to evaluate
 feature_ratios: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05]

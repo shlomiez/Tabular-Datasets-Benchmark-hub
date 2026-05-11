@@ -10,12 +10,9 @@ from src.config import ExperimentConfig, get_device, resolve_paths
 from src.data_preprocessing import build_dataset_paths, dataset_path_report, extract_xy, load_available_datasets
 from src.experiment import run_dataset_experiment
 from src.hyperparameters import get_hyperparameters, output_hyperparameters_to_yaml, output_hyperparameters_to_yaml
-from src.plotting import (
-    plot_and_save_lambda_feature_count_curve,
-    plot_and_save_lambda_ignored_feature_count_curve,
-    plot_and_save_loss_curve,
-)
+from src.plotting import plot_metrics
 from src.utils import ensure_dir, set_global_seed
+
 
 
 def run_pipeline(base_dir: Path | None = None, config: ExperimentConfig | None = None) -> dict[str, Path]:
@@ -25,8 +22,12 @@ def run_pipeline(base_dir: Path | None = None, config: ExperimentConfig | None =
 
     output_dir = ensure_dir(paths.run_output_dir)
     plots_dir = ensure_dir(output_dir / "plots")
-    cache_dir = ensure_dir(paths.base_dir / "tabicl_cache")
-    model_dir = ensure_dir(output_dir / "tabiclv2_model")
+    if config.prediction_model_type == "tabiclv2":
+        cache_dir = ensure_dir(paths.base_dir / "tabicl_cache")
+        model_dir = ensure_dir(output_dir / "tabiclv2_model")
+    else:        
+        cache_dir = None
+        model_dir = None
 
     set_global_seed(config.seed)
     device = get_device()
@@ -94,24 +95,7 @@ def run_pipeline(base_dir: Path | None = None, config: ExperimentConfig | None =
         fold_tables[dataset_name] = fold_df
         loss_tables[dataset_name] = loss_df
 
-        plot_and_save_loss_curve(
-            loss_df=loss_df,
-            dataset_name=dataset_name,
-            plots_dir=plots_dir,
-            title=f"{dataset_name}: Train Loss vs Epoch",
-        )
-
-        if config.feature_selection_method == "lamda_tuning":
-            plot_and_save_lambda_feature_count_curve(
-                summary_df=summary_df,
-                dataset_name=dataset_name,
-                plots_dir=plots_dir,
-            )
-            plot_and_save_lambda_ignored_feature_count_curve(
-                summary_df=summary_df,
-                dataset_name=dataset_name,
-                plots_dir=plots_dir,
-            )
+        plot_metrics(dataset_name, summary_df, loss_df, config, plots_dir)
 
     combined_summary_df = pd.concat(summary_tables.values(), ignore_index=True)
     combined_fold_df = pd.concat(fold_tables.values(), ignore_index=True)
