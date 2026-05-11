@@ -166,7 +166,7 @@ def main():
             
     if results:
         df_results = pd.DataFrame(results)
-        date_and_time = pd.Timestamp.now().strftime("%Y-%m-%d_%H:%M:%S")
+        date_and_time = pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S")
         output_dir = Path("output")
         output_dir.mkdir(exist_ok=True)
         csv_path = output_dir / f"peeling_experiment_results_{date_and_time}.csv"
