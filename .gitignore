@@ -1,2 +1,5 @@
-./output/
+/output/
 src/__pycache__/
+*.err
+*.csv
+*.out

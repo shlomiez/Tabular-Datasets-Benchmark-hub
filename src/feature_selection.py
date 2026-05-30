@@ -220,34 +220,19 @@ def fit_lspin_selector(
         val=False,
     )
 
-    train_losses: list[float] = []
-    best_loss = float("inf")
-    bad_epochs = 0
     effective_batch_size = _effective_lspin_batch_size(X_train.shape[0], int(batch_size), bool(batch_normalization))
 
-    for epoch_index in range(epochs):
-        epoch_losses, _, _ = model.train_model(
-            train_dataset,
-            batch_size=effective_batch_size,
-            num_epoch=1,
-            lr=learning_rate,
-            compute_sim=False,
-        )
-        epoch_loss = epoch_losses[-1] if epoch_losses else None
-        if epoch_loss is None:
-            continue
-
-        current_loss = float(epoch_loss)
-        train_losses.append(current_loss)
-        if current_loss < best_loss - early_stopping_min_delta:
-            best_loss = current_loss
-            bad_epochs = 0
-        else:
-            bad_epochs += 1
-
-        if (epoch_index + 1) >= early_stopping_min_epochs and bad_epochs >= early_stopping_patience:
-            print(f"LSPIN early stopping at epoch {epoch_index + 1} (best loss={best_loss:.6f})")
-            break
+    train_losses, _, _ = model.train_model(
+        train_dataset,
+        batch_size=effective_batch_size,
+        num_epoch=epochs,
+        lr=learning_rate,
+        compute_sim=False,
+        early_stopping_patience=early_stopping_patience,
+        early_stopping_min_delta=early_stopping_min_delta,
+        early_stopping_restore_best=True,
+        early_stopping_min_epochs=early_stopping_min_epochs,
+    )
 
     gate_matrix = model.get_prob_alpha(torch.as_tensor(X_train, dtype=torch.float32, device=model.device))
     if isinstance(gate_matrix, torch.Tensor):
@@ -264,4 +249,4 @@ def fit_lspin_selector(
     average_active_count = float(np.mean(active_counts_per_sample))
 
     selected_indices, _ = _select_from_scores(global_scores, feature_selection_method, k)
-    return selected_indices, [float(value) for value in train_losses], average_active_count, model
+    return selected_indices, train_losses, average_active_count, model

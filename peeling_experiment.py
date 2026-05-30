@@ -1,11 +1,17 @@
 import yaml
 import numpy as np
 import pandas as pd
+import warnings
 from pathlib import Path
+
+# Suppress expected benchmark warnings (Constant features in ANOVA, etc.)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import ExtraTreesClassifier, AdaBoostClassifier
+from sklearn.svm import LinearSVC
 from sklearn.metrics import roc_auc_score
-from sklearn.feature_selection import SelectKBest, mutual_info_classif
+from sklearn.feature_selection import SelectKBest, mutual_info_classif, f_classif, SelectFromModel
 
 from src.data_preprocessing import build_dataset_paths, load_dataset_xy, extract_xy, encode_labels
 
@@ -38,7 +44,37 @@ def evaluate_etree_configs(X_tr, y_tr, X_te, y_te, seed=42):
             
     return best_auc, best_model, auc_list
 
-def run_peeling_experiment(X, y, dataset_name, seed=42, tau=50, low_auc_threshold=0.70):
+def get_best_fs_features(X_tr, y_tr, X_te, y_te, k=60, seed=42):
+    k_actual = min(k, X_tr.shape[1])
+    
+    methods = [
+        ("UnivariateFS", SelectKBest(score_func=f_classif, k=k_actual)),
+        ("ExtraTrees", SelectFromModel(ExtraTreesClassifier(n_estimators=100, random_state=seed), max_features=k_actual)),
+        ("LinearSVC", SelectFromModel(LinearSVC(penalty='l1', dual=False, random_state=seed, max_iter=50000), max_features=k_actual))
+    ]
+    
+    best_auc = -1.0
+    best_indices = None
+    
+    for name, selector in methods:
+        selector.fit(X_tr, y_tr)
+        indices = selector.get_support(indices=True)
+        
+        # Fallback if no features selected
+        if len(indices) == 0:
+            indices = np.arange(k_actual)
+            
+        X_tr_fs = X_tr[:, indices]
+        X_te_fs = X_te[:, indices]
+        
+        auc, _, _ = evaluate_etree_configs(X_tr_fs, y_tr, X_te_fs, y_te, seed=seed)
+        if auc > best_auc:
+            best_auc = auc
+            best_indices = indices
+            
+    return best_auc, best_indices
+
+def run_peeling_experiment(X, y, dataset_name, seed=42, tau=50,     low_auc_threshold=0.70):
     print(f"\n--- Running Peeling Experiment on {dataset_name} ---")
     print(f"Initial dataset size: {X.shape[0]} samples, {X.shape[1]} features")
     y, _ = encode_labels(y)
@@ -54,12 +90,7 @@ def run_peeling_experiment(X, y, dataset_name, seed=42, tau=50, low_auc_threshol
         print(f"Warning: Initial AUC {auc_initial:.4f} is <= {low_auc_threshold}. Expected > {low_auc_threshold}.")
         
     # Step 2: Ground Truth Recovery
-    k_features = min(30, X_train.shape[1])
-    selector = SelectKBest(mutual_info_classif, k=k_features)
-    selector.fit(X_train, y_train)
-    F_best = selector.get_support(indices=True)
-    
-    auc_gt_initial, _, _ = evaluate_etree_configs(X_train[:, F_best], y_train, X_test[:, F_best], y_test, seed=seed)
+    auc_gt_initial, F_best = get_best_fs_features(X_train, y_train, X_test, y_test, k=60, seed=seed)
     print(f"Step 2: Ground Truth AUC (Initial Dataset): {auc_gt_initial:.4f} with {len(F_best)} features")
     
     # Step 3: The Peeling Loop
@@ -110,10 +141,7 @@ def run_peeling_experiment(X, y, dataset_name, seed=42, tau=50, low_auc_threshol
         auc_peeled, _, _ = evaluate_etree_configs(X_train_peeled, y_train_peeled, X_test, y_test, seed=seed)
             
         # 2. Peeled + FS AUC
-        selector_peeled = SelectKBest(mutual_info_classif, k=k_features)
-        X_train_peeled_fs = selector_peeled.fit_transform(X_train_peeled, y_train_peeled)
-        X_test_fs = selector_peeled.transform(X_test)
-        auc_peeled_fs, _, _ = evaluate_etree_configs(X_train_peeled_fs, y_train_peeled, X_test_fs, y_test, seed=seed)
+        auc_peeled_fs, _ = get_best_fs_features(X_train_peeled, y_train_peeled, X_test, y_test, k=60, seed=seed)
             
         # 3. Peeled + GT AUC
         X_train_peeled_gt = X_train_peeled[:, F_best]
@@ -132,13 +160,12 @@ def run_peeling_experiment(X, y, dataset_name, seed=42, tau=50, low_auc_threshol
     
     return {
         "Dataset": dataset_name,
-        "Initial_AUC": auc_initial,
-        "GT_AUC_Initial": auc_gt_initial,
-        "Peeling_Status": status,
-        "Remaining_Samples": len(X_train_peeled),
-        "Base_Peeled_AUC": auc_peeled,
-        "Peeled_FS_AUC": auc_peeled_fs,
-        "Peeled_GT_AUC": auc_peeled_gt
+        "AUC": auc_initial,
+        "+FS": auc_gt_initial,
+        "+Peeled": auc_peeled,
+        "+Peeled FS": auc_peeled_fs,
+        "+Peeled GT": auc_peeled_gt,
+        "Size": len(X_train_peeled)
     }
 
 def main():
