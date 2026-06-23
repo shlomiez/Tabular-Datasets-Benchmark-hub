@@ -128,14 +128,135 @@ def plot_lambda_tuning_features(dataset_name, part, plots_dir):
     fig_sel.savefig(sel_plot_path, dpi=150, bbox_inches="tight")
     plt.close(fig_sel)
 
+
+def _safe_filename(value: str) -> str:
+    """Convert a label into a filesystem-friendly filename stem."""
+    return "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in value).strip("_")
+
+
+def _load_concrete_metric_files(folder: Path) -> pd.DataFrame:
+    """Combine all per-run concrete metric CSVs into a single dataframe."""
+    metric_paths = sorted(folder.glob("*_concrete_metrics.csv"))
+    if not metric_paths:
+        return pd.DataFrame()
+
+    frames = []
+    for metric_path in metric_paths:
+        frame = pd.read_csv(metric_path)
+        required_columns = {"dataset_name", "k_features"}
+        if not required_columns.issubset(frame.columns):
+            continue
+
+        frame = frame.copy()
+        frame.insert(0, "source_file", metric_path.name)
+
+        for column_name in ("Accuracy", "AUC"):
+            if column_name not in frame.columns:
+                frame[column_name] = np.nan
+
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["k_features"] = pd.to_numeric(combined["k_features"], errors="coerce")
+    combined["Accuracy"] = pd.to_numeric(combined["Accuracy"], errors="coerce")
+    combined["AUC"] = pd.to_numeric(combined["AUC"], errors="coerce")
+    combined = combined.dropna(subset=["dataset_name", "k_features"])
+    combined = combined.sort_values(["dataset_name", "k_features"]).reset_index(drop=True)
+    combined["k_features"] = combined["k_features"].astype(int)
+    return combined
+
+
+def _plot_concrete_metric_trends(dataset_name: str, part: pd.DataFrame, plots_dir: Path) -> None:
+    """Plot Accuracy and AUC versus selected features for one dataset."""
+    part = part.sort_values("k_features").copy()
+    if part.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+
+    if part["Accuracy"].notna().any():
+        ax.plot(
+            part["k_features"],
+            part["Accuracy"],
+            marker="o",
+            linewidth=lw,
+            markersize=ms,
+            color="tab:blue",
+            label="Accuracy",
+        )
+
+    if part["AUC"].notna().any():
+        ax.plot(
+            part["k_features"],
+            part["AUC"],
+            marker="s",
+            linewidth=lw,
+            markersize=ms,
+            color="tab:orange",
+            label="AUC",
+        )
+
+    ax.set_title(f"{dataset_name}: Concrete Autoencoder Performance", fontsize=fs_title, fontweight="bold")
+    ax.set_xlabel("Selected features (k)", fontsize=fs_label, fontweight="bold")
+    ax.set_ylabel("Score", fontsize=fs_label, fontweight="bold")
+    ax.set_xticks(part["k_features"].tolist())
+
+    metric_values = part[["Accuracy", "AUC"]].to_numpy(dtype=float)
+    finite_values = metric_values[np.isfinite(metric_values)]
+    y_max = 1.0 if finite_values.size == 0 else max(1.0, float(finite_values.max()) * 1.1)
+    ax.set_ylim(0, y_max)
+
+    ax.tick_params(axis="both", labelsize=fs_tick)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=fs_legend)
+
+    fig.tight_layout()
+    plot_path = plots_dir / f"{_safe_filename(dataset_name)}_concrete_performance.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_concrete_results(input_dir: str):
+    """Build one combined CSV and one performance plot per dataset for Concrete Autoencoder runs."""
+    folder = Path(input_dir)
+    if not folder.exists() or not folder.is_dir():
+        print(f"Error: Directory '{input_dir}' does not exist.")
+        return
+
+    combined_df = _load_concrete_metric_files(folder)
+    if combined_df.empty:
+        print(f"No Concrete Autoencoder metric CSVs found in {folder}")
+        return
+
+    summary_csv_path = folder / "concrete_metrics_summary.csv"
+    combined_df.to_csv(summary_csv_path, index=False)
+
+    plots_dir = folder / "plots_concrete_summary"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    for dataset_name, part in combined_df.groupby("dataset_name", sort=True):
+        _plot_concrete_metric_trends(dataset_name, part, plots_dir)
+
+    print(f"Concrete summary CSV saved to '{summary_csv_path}'")
+    print(f"Concrete dataset plots saved to '{plots_dir}'")
+
 def plot_results(input_dir: str):
     folder = Path(input_dir)
     if not folder.exists() or not folder.is_dir():
         print(f"Error: Directory '{input_dir}' does not exist.")
         return
 
+    concrete_metric_paths = sorted(folder.glob("*_concrete_metrics.csv"))
+    standard_summary_path = folder / "iterative_feature_curve_summary.csv"
+    if concrete_metric_paths and not standard_summary_path.exists():
+        plot_concrete_results(input_dir)
+        return
+
     # Check for the expected CSV files
-    summary_path = folder / "iterative_feature_curve_summary.csv"
+    summary_path = standard_summary_path
     loss_path = folder / "iterative_feature_curve_loss_history.csv"
 
     if not summary_path.exists():
@@ -239,10 +360,16 @@ def plot_results(input_dir: str):
     print(f"All plots saved securely inside '{plots_dir}'")
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser(description="Generate publication quality plots from evaluation output CSVs.")
-    # parser.add_argument("folder_path", type=str, help="Path to the directory containing summary.csv and loss.csv files.")
-    
-    # args = parser.parse_args()
-    # folder_path = r"G:\האחסון שלי\Colab Notebooks\Thesis\output\2026-04-17_06-50-10-batch-size-deg-for-lss"
-    folder_path = "/home/fast/ezrashl1/Tabular-Datasets-Benchmark-hub/output/2026-05-11_12-29-32"
-    plot_results(folder_path)
+    parser = argparse.ArgumentParser(description="Generate plots from evaluation output CSVs.")
+    parser.add_argument("folder_path", nargs="?", default=".", help="Path to the output directory.")
+    parser.add_argument(
+        "--concrete",
+        action="store_true",
+        help="Force Concrete Autoencoder summary CSV and per-dataset plots.",
+    )
+
+    args = parser.parse_args()
+    if args.concrete:
+        plot_concrete_results(args.folder_path)
+    else:
+        plot_results(args.folder_path)
