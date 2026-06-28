@@ -1,6 +1,7 @@
 use_peeling: false
 peeling_tau: 50
 peeling_low_auc_threshold: 0.7
+resume_output_dir: /home/fast/ezrashl1/Tabular-Datasets-Benchmark-hub/output/2026-06-25_00-36-53
 seed: 42
 n_splits: 5
 feature_selection_method: features_ratio
@@ -10,6 +11,7 @@ prediction_model_type: tabiclv2
 evaluation_mode: full
 dataset_names:
 - Breast
+- madelon
 - colon
 - SMK-CAN-187
 - RELATHE

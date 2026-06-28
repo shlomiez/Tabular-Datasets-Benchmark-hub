@@ -1,6 +1,7 @@
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+import argparse
 import numpy as np
 import yaml
 import pandas as pd
@@ -27,7 +28,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         config = yaml.safe_load(f)
     return config
 
-def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
+def run_pipeline(config_path: str, resume_output_dir_override: str) -> Dict[str, Dict[str, float]]:
     """
     Run an end-to-end pipeline:
     1. Parse configuration.
@@ -46,6 +47,9 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
     task_type = config.get('task_type', 'classification')
     k_features_cfg = config.get('concrete_k_values', 10)
     concrete_device = str(config.get('concrete_device', 'cpu')).strip().lower()
+    resume_output_dir = resume_output_dir_override or config.get('resume_output_dir', None)
+    resume_from_checkpoints = bool(config.get('resume_from_checkpoints', True))
+    skip_completed = bool(config.get('skip_completed', True))
 
     if concrete_device not in {'cpu', 'gpu', 'auto'}:
         raise ValueError("config.yml option 'concrete_device' must be one of: cpu, gpu, auto")
@@ -88,7 +92,11 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
     # 2. Setup Output Directories (Similar to main.py / pipeline.py)
     base_dir = Path.cwd()
     paths = resolve_paths(base_dir=base_dir)
-    output_dir = ensure_dir(paths.run_output_dir)
+    if resume_output_dir:
+        output_dir = ensure_dir(Path(resume_output_dir).expanduser().resolve())
+        print(f"Resuming concrete run in existing output directory: {output_dir}")
+    else:
+        output_dir = ensure_dir(paths.run_output_dir)
     plots_dir = ensure_dir(output_dir / "plots")
     checkpoints_dir = ensure_dir(output_dir / "checkpoints")
 
@@ -128,10 +136,28 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
     with (output_dir / "effective_config.yaml").open("w") as f:
         yaml.safe_dump(config, f, sort_keys=False)
     
-    # Save a copy of the configuration into the run's output folder
     results: dict[str, Dict[str, float]] = {}
-    concrete_rows: list[dict[str, float]] = []
+    concrete_rows: list[dict[str, Any]] = []
     loss_rows: list[dict[str, Any]] = []
+
+    summary_csv = output_dir / "iterative_feature_curve_summary.csv"
+    if summary_csv.exists():
+        existing_summary_df = pd.read_csv(summary_csv)
+        if not existing_summary_df.empty:
+            concrete_rows.extend(existing_summary_df.to_dict(orient="records"))
+
+    loss_csv = output_dir / "iterative_feature_curve_loss_history.csv"
+    if loss_csv.exists():
+        existing_loss_df = pd.read_csv(loss_csv)
+        if not existing_loss_df.empty:
+            loss_rows.extend(existing_loss_df.to_dict(orient="records"))
+
+    completed_keys: set[tuple[str, int]] = set()
+    for row in concrete_rows:
+        dataset_value = row.get("dataset_name")
+        k_value = row.get("k_features")
+        if pd.notna(dataset_value) and pd.notna(k_value):
+            completed_keys.add((str(dataset_value), int(k_value)))
 
     if dataset_names:
         dataset_paths = build_dataset_paths(paths.data_root)
@@ -185,6 +211,10 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
             # 4. Feature Selection (Concrete Autoencoder)
             print(f"Selecting top {cae_k} features using Concrete Autoencoder...")
 
+            if skip_completed and (dataset_name, int(cae_k)) in completed_keys:
+                print(f"Skipping {run_label}: already present in {summary_csv.name}")
+                continue
+
             def decoder(x):
                 return Dense(X_train_np.shape[1])(x)
 
@@ -196,35 +226,46 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
                 tryout_limit=1,
             )
 
-            # Fit strictly on training data (Autoencoder reconstructs X_train)
-            try:
-                selector.fit(X_train_np, X_train_np, val_X=X_test_np, val_Y=X_test_np)
-            except RuntimeError as exc:
-                msg = str(exc)
-                if 'RESOURCE_EXHAUSTED' in msg or 'CUDA_ERROR_OUT_OF_MEMORY' in msg:
-                    raise RuntimeError(
-                        "Concrete Autoencoder ran out of GPU memory. "
-                        "Set concrete_device: cpu in config.yml (or keep the default cpu) "
-                        "to run feature selection on CPU."
-                    ) from exc
-                raise
-            history = getattr(getattr(selector, "model", None), "history", None)
-
             checkpoint_path = checkpoints_dir / f"{dataset_name}_k{cae_k}_concrete_autoencoder.keras"
+            indices_path = checkpoints_dir / f"{dataset_name}_k{cae_k}_indices.npy"
             checkpoint_status = "saved"
-            try:
-                if getattr(selector, "model", None) is not None:
-                    selector.model.save(checkpoint_path)
-                else:
-                    checkpoint_status = "unsupported"
-            except Exception as exc:
-                checkpoint_status = f"failed: {exc.__class__.__name__}"
-                checkpoint_path = None
+            history = None
+
+            if resume_from_checkpoints and indices_path.exists():
+                indices = np.load(indices_path).astype(int)
+                checkpoint_status = "loaded_indices"
+                print(f"Loaded feature indices from checkpoint: {indices_path.name}")
+            else:
+                # Fit strictly on training data (Autoencoder reconstructs X_train)
+                try:
+                    selector.fit(X_train_np, X_train_np, val_X=X_test_np, val_Y=X_test_np)
+                except RuntimeError as exc:
+                    msg = str(exc)
+                    if 'RESOURCE_EXHAUSTED' in msg or 'CUDA_ERROR_OUT_OF_MEMORY' in msg:
+                        raise RuntimeError(
+                            "Concrete Autoencoder ran out of GPU memory. "
+                            "Set concrete_device: cpu in config.yml (or keep the default cpu) "
+                            "to run feature selection on CPU."
+                        ) from exc
+                    raise
+
+                history = getattr(getattr(selector, "model", None), "history", None)
+
+                try:
+                    if getattr(selector, "model", None) is not None:
+                        selector.model.save(checkpoint_path)
+                    else:
+                        checkpoint_status = "unsupported"
+                except Exception as exc:
+                    checkpoint_status = f"failed: {exc.__class__.__name__}"
+                    checkpoint_path = None
+
+                indices = selector.get_indices()
+                np.save(indices_path, np.asarray(indices, dtype=np.int64))
 
             # Transform both train and test sets structure
             # Note: ConcreteAutoencoder's transform method may fail on Pandas Dataframes or has a bug (using 1D index on 2D array)
             # so we extract indices manually to be safe.
-            indices = selector.get_indices()
             X_train_reduced = X_train_np[:, indices]
             X_test_reduced = X_test_np[:, indices]
 
@@ -290,6 +331,7 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
             )
             row_dict = metrics_df.iloc[0].to_dict()
             concrete_rows.append(row_dict)
+            completed_keys.add((dataset_name, int(cae_k)))
 
             history_dict = getattr(history, "history", {}) if history is not None else {}
             train_loss_history = history_dict.get("loss", []) if isinstance(history_dict, dict) else []
@@ -343,13 +385,17 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
         concrete_df["k_features"] = pd.to_numeric(concrete_df["k_features"], errors="coerce")
         concrete_df = concrete_df.dropna(subset=["dataset_name", "k_features"])
         concrete_df["k_features"] = concrete_df["k_features"].astype(int)
+        concrete_df = concrete_df.drop_duplicates(subset=["dataset_name", "k_features"], keep="last")
         concrete_df = concrete_df.sort_values(["dataset_name", "k_features"]).reset_index(drop=True)
 
-        summary_csv = output_dir / "iterative_feature_curve_summary.csv"
         concrete_df.to_csv(summary_csv, index=False)
 
         loss_df = pd.DataFrame(loss_rows)
-        loss_csv = output_dir / "iterative_feature_curve_loss_history.csv"
+        if not loss_df.empty:
+            loss_df = loss_df.drop_duplicates(
+                subset=["dataset", "selector", "algorithm", "selection_value", "k_features", "epoch", "split"],
+                keep="last",
+            )
         loss_df.to_csv(loss_csv, index=False)
 
         for dataset_name, dataset_df in concrete_df.groupby("dataset_name", sort=True):
@@ -407,5 +453,19 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
     return results
 
 if __name__ == "__main__":
-    results = run_pipeline("config.yml")
+    parser = argparse.ArgumentParser(description="Run Concrete Autoencoder + TabICL pipeline")
+    parser.add_argument("--config", default="config.yml", help="Path to configuration YAML file")
+    parser.add_argument(
+        "--resume-output-dir",
+        default=None,
+        help="Existing output directory to resume from using saved checkpoints",
+    )
+    args = parser.parse_args()
+
+    config_path = str(Path(args.config).expanduser().resolve())
+    resume_output_dir = None
+    if args.resume_output_dir:
+        resume_output_dir = str(Path(args.resume_output_dir).expanduser().resolve())
+
+    results = run_pipeline(config_path, resume_output_dir_override=resume_output_dir)
     print(results)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,9 @@ from src.utils import ensure_dir, set_global_seed
 def run_pipeline(base_dir: Path | None = None, config: ExperimentConfig | None = None) -> dict[str, Path]:
     """Run the full experiment pipeline and return output artifact paths."""
     config = config or ExperimentConfig()
+    if config.resume_output_dir:
+        os.environ["THESIS_OUTPUT_DIR"] = str(Path(config.resume_output_dir).expanduser().resolve())
+
     paths = resolve_paths(base_dir=base_dir)
 
     output_dir = ensure_dir(paths.run_output_dir)

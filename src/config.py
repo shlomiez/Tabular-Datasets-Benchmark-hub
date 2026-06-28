@@ -56,6 +56,8 @@ class ExperimentConfig:
     # Split policy: 'cv' (use n_splits) or 'single' (train_test_split)
     split_policy: str = "cv"
     lambda_values: list[float] = field(default_factory=lambda: [0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0])
+    # Optional existing run directory to resume from. If set, artifacts/checkpoints are reused there.
+    resume_output_dir: str | None = None
     lambda_ranges_by_dataset: dict[str, dict[str, list[float]]] = field(
         default_factory=lambda: {
             "madelon": {
