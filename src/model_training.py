@@ -81,10 +81,10 @@ def fit_prediction_model(
 
         model = TabICLClassifier(
             disk_offload_dir=str(cache_dir),
-            kv_cache=False,
+            # kv_cache=False,
             random_state=random_state,
             device=device,
-            model_path=model_dir,
+            # model_path=model_dir,
             verbose=True,
         )
         model.fit(X_train, y_train)

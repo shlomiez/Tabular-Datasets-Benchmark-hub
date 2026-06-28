@@ -13,14 +13,13 @@ from sklearn.metrics import accuracy_score, roc_auc_score, mean_squared_error
 from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 
 # Import necessary modules
-from concrete_autoencoder import ConcreteAutoencoderFeatureSelector
 from tabicl import TabICLClassifier
-from keras.layers import Dense
 
 from src.utils import ensure_dir
 from src.config import resolve_paths
 from src.data_preprocessing import build_dataset_paths, load_dataset_xy
-from src.plotting import plot_concrete_metrics, plot_auc_and_accuracy, plot_loss_curves
+from src.model_training import evaluate_classifier, fit_extra_trees
+from src.plotting import plot_concrete_results
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load configuration from a YAML file."""
@@ -46,6 +45,31 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
     target_column = config.get('target_column_name', 'target')
     task_type = config.get('task_type', 'classification')
     k_features_cfg = config.get('concrete_k_values', 10)
+    concrete_device = str(config.get('concrete_device', 'cpu')).strip().lower()
+
+    if concrete_device not in {'cpu', 'gpu', 'auto'}:
+        raise ValueError("config.yml option 'concrete_device' must be one of: cpu, gpu, auto")
+
+    # Configure TensorFlow device behavior before importing Concrete Autoencoder.
+    # Defaulting to CPU avoids common GPU OOM failures during TF context init.
+    if concrete_device == 'cpu':
+        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    else:
+        os.environ.setdefault('TF_FORCE_GPU_ALLOW_GROWTH', 'true')
+
+    from concrete_autoencoder import ConcreteAutoencoderFeatureSelector
+    from keras.layers import Dense
+
+    if concrete_device in {'gpu', 'auto'}:
+        try:
+            import tensorflow as tf
+            for gpu in tf.config.list_physical_devices('GPU'):
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except Exception:
+            # If memory growth cannot be configured, continue and rely on TF defaults.
+            pass
+
+    print(f"Concrete Autoencoder device mode: {concrete_device}")
 
     if not dataset_names and not dataset_path:
         raise ValueError("config.yml must specify 'dataset_names' or 'dataset_path'")
@@ -66,9 +90,48 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
     paths = resolve_paths(base_dir=base_dir)
     output_dir = ensure_dir(paths.run_output_dir)
     plots_dir = ensure_dir(output_dir / "plots")
+    checkpoints_dir = ensure_dir(output_dir / "checkpoints")
+
+    config_source_path = Path(config_path).resolve()
+    if config_source_path.exists():
+        shutil.copy2(config_source_path, output_dir / "config.yml")
+    else:
+        print(f"Warning: config file not found at {config_source_path}; saving in-memory config copy only.")
+
+    run_hparams = {
+        "feature_selector": "concrete_autoencoder",
+        "prediction_model": "TabICLClassifier",
+        "baseline_model": {
+            "name": "ExtraTrees",
+            "n_estimators": 100,
+            "max_depth": 3,
+        },
+        "split": {
+            "test_size": 0.2,
+            "random_state": 42,
+        },
+        "prefilter": {
+            "variance_threshold": "enabled",
+            "select_k_best_k": 1000,
+            "score_func": "f_classif",
+        },
+        "concrete_autoencoder": {
+            "k_values": [int(v) for v in k_values],
+            "num_epochs": 100,
+            "tryout_limit": 1,
+            "device_mode": concrete_device,
+        },
+    }
+    with (output_dir / "hyperparameters.yaml").open("w") as f:
+        yaml.safe_dump(run_hparams, f, sort_keys=False)
+
+    with (output_dir / "effective_config.yaml").open("w") as f:
+        yaml.safe_dump(config, f, sort_keys=False)
     
     # Save a copy of the configuration into the run's output folder
     results: dict[str, Dict[str, float]] = {}
+    concrete_rows: list[dict[str, float]] = []
+    loss_rows: list[dict[str, Any]] = []
 
     if dataset_names:
         dataset_paths = build_dataset_paths(paths.data_root)
@@ -134,8 +197,29 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
             )
 
             # Fit strictly on training data (Autoencoder reconstructs X_train)
-            selector.fit(X_train_np, X_train_np, val_X=X_test_np, val_Y=X_test_np)
+            try:
+                selector.fit(X_train_np, X_train_np, val_X=X_test_np, val_Y=X_test_np)
+            except RuntimeError as exc:
+                msg = str(exc)
+                if 'RESOURCE_EXHAUSTED' in msg or 'CUDA_ERROR_OUT_OF_MEMORY' in msg:
+                    raise RuntimeError(
+                        "Concrete Autoencoder ran out of GPU memory. "
+                        "Set concrete_device: cpu in config.yml (or keep the default cpu) "
+                        "to run feature selection on CPU."
+                    ) from exc
+                raise
             history = getattr(getattr(selector, "model", None), "history", None)
+
+            checkpoint_path = checkpoints_dir / f"{dataset_name}_k{cae_k}_concrete_autoencoder.keras"
+            checkpoint_status = "saved"
+            try:
+                if getattr(selector, "model", None) is not None:
+                    selector.model.save(checkpoint_path)
+                else:
+                    checkpoint_status = "unsupported"
+            except Exception as exc:
+                checkpoint_status = f"failed: {exc.__class__.__name__}"
+                checkpoint_path = None
 
             # Transform both train and test sets structure
             # Note: ConcreteAutoencoder's transform method may fail on Pandas Dataframes or has a bug (using 1D index on 2D array)
@@ -157,12 +241,13 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
             # Fit using reduced datasets
             model.fit(X_train_reduced, y_train)
 
-            # Generate predictions
-            predictions = model.predict(X_test_reduced)
-
             # 6. Evaluation and output saving
             metrics: Dict[str, float] = {}
+            train_metrics: Dict[str, float] = {}
+            baseline_metrics: Dict[str, float] = {}
+            baseline_train_metrics: Dict[str, float] = {}
             if task_type == 'classification':
+                predictions = model.predict(X_test_reduced)
                 metrics['Accuracy'] = accuracy_score(y_test, predictions)
                 # Assuming predictions contains labels; if it has probabilities, compute AUC
                 if hasattr(model, "predict_proba"):
@@ -172,66 +257,154 @@ def run_pipeline(config_path: str) -> Dict[str, Dict[str, float]]:
                     else:
                         metrics['AUC'] = roc_auc_score(y_test, probas, multi_class='ovr')
 
+                train_metrics = evaluate_classifier(model, X_train_reduced, y_train)
+
+                baseline_model = fit_extra_trees(X_train, np.asarray(y_train), random_state=42)
+                baseline_train_metrics = evaluate_classifier(baseline_model, X_train, y_train)
+                baseline_metrics = evaluate_classifier(baseline_model, X_test, y_test)
+
             print(f"Pipeline evaluation completed. Metrics: {metrics}")
 
-            # Reuse existing plotting styles (AUC/Accuracy + loss curves)
-            auc_value = metrics.get("AUC", np.nan)
-            accuracy_value = metrics.get("Accuracy", np.nan)
-            summary_df = pd.DataFrame([
-                {
-                    "baseline_auc_mean": auc_value,
-                    "stg_auc_mean": auc_value,
-                    "lspin_auc_mean": auc_value,
-                    "baseline_accuracy_mean": accuracy_value,
-                    "stg_accuracy_mean": accuracy_value,
-                    "lspin_accuracy_mean": accuracy_value,
-                }
-            ])
-            x_values = np.array([cae_k])
-            plot_auc_and_accuracy(
-                run_label,
-                summary_df,
-                x_values,
-                x_values,
-                x_values,
-                False,
-                "Selected features (k)",
-                "linear",
-                plots_dir,
-                "concrete",
-            )
-
-            loss_df = pd.DataFrame()
-            if history is not None and "loss" in history.history:
-                loss_df = pd.DataFrame(
+            # Save metrics cleanly into a CSV file inside the output directory
+            metrics_df = pd.DataFrame(
+                [
                     {
-                        "algorithm": ["Concrete"] * len(history.history["loss"]),
-                        "epoch": list(range(1, len(history.history["loss"]) + 1)),
-                        "train_loss": history.history["loss"],
+                        "dataset_name": dataset_name,
+                        "selector": "concrete_autoencoder",
+                        "feature_selection_method": "single_split",
+                        "selection_value": cae_k,
+                        "fold_count": 1,
+                        "k_features": cae_k,
+                        "Accuracy": metrics.get("Accuracy", np.nan),
+                        "AUC": metrics.get("AUC", np.nan),
+                        "train_Accuracy": train_metrics.get("accuracy", np.nan),
+                        "train_AUC": train_metrics.get("auc", np.nan),
+                        "baseline_Accuracy": baseline_metrics.get("accuracy", np.nan),
+                        "baseline_AUC": baseline_metrics.get("auc", np.nan),
+                        "baseline_train_Accuracy": baseline_train_metrics.get("accuracy", np.nan),
+                        "baseline_train_AUC": baseline_train_metrics.get("auc", np.nan),
+                        "checkpoint_path": str(checkpoint_path) if isinstance(checkpoint_path, Path) else np.nan,
+                        "checkpoint_status": checkpoint_status,
+                    }
+                ]
+            )
+            row_dict = metrics_df.iloc[0].to_dict()
+            concrete_rows.append(row_dict)
+
+            history_dict = getattr(history, "history", {}) if history is not None else {}
+            train_loss_history = history_dict.get("loss", []) if isinstance(history_dict, dict) else []
+            val_loss_history = history_dict.get("val_loss", []) if isinstance(history_dict, dict) else []
+
+            if train_loss_history:
+                for epoch_idx, loss_value in enumerate(train_loss_history, start=1):
+                    loss_rows.append(
+                        {
+                            "dataset": dataset_name,
+                            "selector": "concrete_autoencoder",
+                            "algorithm": "ConcreteAutoencoder",
+                            "selection_value": cae_k,
+                            "k_features": int(cae_k),
+                            "epoch": epoch_idx,
+                            "split": "train",
+                            "train_loss": float(loss_value),
+                        }
+                    )
+                for epoch_idx, loss_value in enumerate(val_loss_history, start=1):
+                    loss_rows.append(
+                        {
+                            "dataset": dataset_name,
+                            "selector": "concrete_autoencoder",
+                            "algorithm": "ConcreteAutoencoder",
+                            "selection_value": cae_k,
+                            "k_features": int(cae_k),
+                            "epoch": epoch_idx,
+                            "split": "validation",
+                            "train_loss": float(loss_value),
+                        }
+                    )
+            else:
+                loss_rows.append(
+                    {
+                        "dataset": dataset_name,
+                        "selector": "concrete_autoencoder",
+                        "algorithm": "ConcreteAutoencoder",
+                        "selection_value": cae_k,
+                        "k_features": int(cae_k),
+                        "epoch": np.nan,
+                        "split": "train",
+                        "train_loss": np.nan,
                     }
                 )
-            plot_loss_curves(run_label, loss_df, plots_dir, "concrete")
-
-            # Save the output plot
-            plot_concrete_metrics(run_label, metrics, plots_dir)
-
-            # Save metrics cleanly into a CSV file inside the output directory
-            metrics_df = pd.DataFrame([metrics])
-            metrics_df.insert(0, "dataset_name", dataset_name)
-            metrics_df.insert(1, "k_features", cae_k)
-            metrics_csv_path = output_dir / f"{run_label}_concrete_metrics.csv"
-            metrics_df.to_csv(metrics_csv_path, index=False)
 
             results[run_label] = metrics
+
+    if concrete_rows:
+        concrete_df = pd.DataFrame(concrete_rows)
+        concrete_df["k_features"] = pd.to_numeric(concrete_df["k_features"], errors="coerce")
+        concrete_df = concrete_df.dropna(subset=["dataset_name", "k_features"])
+        concrete_df["k_features"] = concrete_df["k_features"].astype(int)
+        concrete_df = concrete_df.sort_values(["dataset_name", "k_features"]).reset_index(drop=True)
+
+        summary_csv = output_dir / "iterative_feature_curve_summary.csv"
+        concrete_df.to_csv(summary_csv, index=False)
+
+        loss_df = pd.DataFrame(loss_rows)
+        loss_csv = output_dir / "iterative_feature_curve_loss_history.csv"
+        loss_df.to_csv(loss_csv, index=False)
+
+        for dataset_name, dataset_df in concrete_df.groupby("dataset_name", sort=True):
+            dataset_csv_path = output_dir / f"{dataset_name}_concrete_metrics.csv"
+            dataset_df.to_csv(dataset_csv_path, index=False)
+
+        plot_concrete_results(concrete_df, output_dir)
+
+        print("Saved outputs:")
+        print(f"- {summary_csv}")
+        print(f"- {loss_csv}")
+        print(f"- {output_dir / 'config.yml'}")
+        print(f"- {output_dir / 'effective_config.yaml'}")
+        print(f"- {output_dir / 'hyperparameters.yaml'}")
+        print("- Fold-level CSV omitted: this pipeline runs single split (no cross-validation).")
+    else:
+        pd.DataFrame(
+            columns=[
+                "dataset_name",
+                "selector",
+                "feature_selection_method",
+                "selection_value",
+                "fold_count",
+                "k_features",
+                "Accuracy",
+                "AUC",
+                "train_Accuracy",
+                "train_AUC",
+                "baseline_Accuracy",
+                "baseline_AUC",
+                "baseline_train_Accuracy",
+                "baseline_train_AUC",
+                "checkpoint_path",
+                "checkpoint_status",
+            ]
+        ).to_csv(output_dir / "iterative_feature_curve_summary.csv", index=False)
+
+        pd.DataFrame(
+            columns=[
+                "dataset",
+                "selector",
+                "algorithm",
+                "selection_value",
+                "k_features",
+                "epoch",
+                "split",
+                "train_loss",
+            ]
+        ).to_csv(output_dir / "iterative_feature_curve_loss_history.csv", index=False)
+
+        print("Fold-level CSV omitted: this pipeline runs single split (no cross-validation).")
 
     print(f"Pipeline completed successfully. Outputs saved in: {output_dir}")
 
     return results
-    metrics_df.to_csv(metrics_csv_path, index=False)
-    
-    print(f"Pipeline completed successfully. Outputs saved in: {output_dir}")
-    
-    return predictions, metrics
 
 if __name__ == "__main__":
     results = run_pipeline("config.yml")

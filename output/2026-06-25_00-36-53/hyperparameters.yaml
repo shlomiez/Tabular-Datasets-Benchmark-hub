@@ -1,0 +1,23 @@
+feature_selector: concrete_autoencoder
+prediction_model: TabICLClassifier
+baseline_model:
+  name: ExtraTrees
+  n_estimators: 100
+  max_depth: 3
+split:
+  test_size: 0.2
+  random_state: 42
+prefilter:
+  variance_threshold: enabled
+  select_k_best_k: 1000
+  score_func: f_classif
+concrete_autoencoder:
+  k_values:
+  - 60
+  - 30
+  - 10
+  - 5
+  - 1
+  num_epochs: 100
+  tryout_limit: 1
+  device_mode: cpu

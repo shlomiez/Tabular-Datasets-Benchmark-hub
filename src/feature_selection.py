@@ -5,9 +5,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
-featselectlib_path = project_root / "project-featselectlib"
-if str(featselectlib_path) not in sys.path:
-    sys.path.insert(0, str(featselectlib_path))
+
+for featselectlib_path in (
+    project_root / "project-featselectlib",
+    project_root.parent / "project-featselectlib",
+):
+    if featselectlib_path.exists() and str(featselectlib_path) not in sys.path:
+        sys.path.insert(0, str(featselectlib_path))
+        break
 
 from typing import Any, Sequence
 
@@ -250,3 +255,48 @@ def fit_lspin_selector(
 
     selected_indices, _ = _select_from_scores(global_scores, feature_selection_method, k)
     return selected_indices, train_losses, average_active_count, model
+
+
+def fit_concrete_selector(
+    X_train: np.ndarray,
+    k: int,
+    num_epochs: int = 100,
+    random_state: int | None = None,
+    decoder_factory: Any | None = None,
+) -> tuple[np.ndarray, list[float], Any]:
+    """Fit Concrete Autoencoder and return selected indices, loss history, and selector object.
+
+    Decoder factory should be a callable that accepts input_dim and returns a Keras layer/function.
+    """
+    try:
+        from concrete_autoencoder import ConcreteAutoencoderFeatureSelector
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("Missing dependency 'concrete_autoencoder'.") from exc
+
+    # Default simple linear decoder if none provided
+    if decoder_factory is None:
+        try:
+            from keras.layers import Dense
+
+            def decoder_factory_inner(input_dim: int):
+                return lambda x: Dense(input_dim)(x)
+
+            decoder_factory = decoder_factory_inner
+        except Exception:
+            decoder_factory = None
+
+    input_dim = X_train.shape[1]
+    output_fn = decoder_factory(input_dim) if decoder_factory is not None else None
+
+    selector = ConcreteAutoencoderFeatureSelector(K=k, output_function=output_fn, num_epochs=num_epochs, tryout_limit=1)
+
+    # Fit on X_train (reconstruct X)
+    selector.fit(X_train, X_train)
+
+    history = getattr(getattr(selector, "model", None), "history", None)
+    train_losses: list[float] = []
+    if history is not None and hasattr(history, "history") and "loss" in history.history:
+        train_losses = list(history.history["loss"])
+
+    indices = selector.get_indices()
+    return np.asarray(indices, dtype=np.int64), train_losses, selector

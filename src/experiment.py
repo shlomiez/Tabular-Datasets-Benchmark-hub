@@ -8,12 +8,15 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from src.data_preprocessing import encode_labels, extract_xy, prepare_fold_arrays
 from src.feature_selection import fit_lspin_selector, fit_stg_selector, ratio_to_k
 from src.model_training import evaluate_classifier, fit_prediction_model
 from src.utils import set_global_seed
+from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_classif
+from src.feature_selection import fit_concrete_selector
+from typing import Tuple
 
 
 def checkpoint_key(dataset_name: str, feature_selection_method: str, selection_value: str, fold_index: int) -> str:
@@ -38,6 +41,26 @@ def save_checkpoint(output_dir: Path, dataset_name: str, fold_df: pd.DataFrame) 
     """Persist fold-level checkpoint."""
     checkpoint_path = get_checkpoint_path(output_dir, dataset_name)
     fold_df.to_pickle(checkpoint_path)
+
+
+def get_selector_checkpoint_path(output_dir: Path, dataset_name: str, selector_name: str) -> Path:
+    """Return checkpoint path for single-split selector runs."""
+    safe_selector_name = selector_name.replace("/", "_").replace(" ", "_")
+    return output_dir / f"checkpoint_{dataset_name}_{safe_selector_name}.pkl"
+
+
+def load_selector_checkpoint(output_dir: Path, dataset_name: str, selector_name: str) -> pd.DataFrame:
+    """Load single-split selector checkpoint if available."""
+    checkpoint_path = get_selector_checkpoint_path(output_dir, dataset_name, selector_name)
+    if checkpoint_path.exists():
+        return pd.read_pickle(checkpoint_path)
+    return pd.DataFrame()
+
+
+def save_selector_checkpoint(output_dir: Path, dataset_name: str, selector_name: str, selector_df: pd.DataFrame) -> None:
+    """Persist single-split selector checkpoint."""
+    checkpoint_path = get_selector_checkpoint_path(output_dir, dataset_name, selector_name)
+    selector_df.to_pickle(checkpoint_path)
 
 
 def expand_loss_histories(fold_df: pd.DataFrame) -> pd.DataFrame:
@@ -152,6 +175,7 @@ def run_fold_experiment(
     cache_dir: Path,
     model_dir: Path,
     prediction_model_type: str = "etree",
+    statistical_prefilter_k: int = 1000,
     k: int | None = None,
     lambda_value: float | None = None,
     lspin_lambda_value: float | None = None,
@@ -176,6 +200,14 @@ def run_fold_experiment(
         )
 
     X_train_scaled, X_test_scaled = prepare_fold_arrays(X_train, X_test)
+
+    if prediction_model_type == "tabiclv2":
+        X_train_scaled, X_test_scaled, _ = _apply_statistical_prefilter(
+            X_train_scaled,
+            X_test_scaled,
+            y_train,
+            prefilter_k=statistical_prefilter_k,
+        )
 
     if evaluation_mode == "full":
         baseline_model = fit_prediction_model(
@@ -369,6 +401,125 @@ def run_fold_experiment(
     }
 
 
+def _apply_statistical_prefilter(
+    X_train: np.ndarray, X_test: np.ndarray, y_train: np.ndarray, prefilter_k: int = 1000
+) -> Tuple[np.ndarray, np.ndarray, Any]:
+    """Apply VarianceThreshold then optional SelectKBest (fit on train only).
+
+    Returns transformed X_train, X_test and the fitted selector object (SelectKBest or None).
+    """
+    X_train_np = np.asarray(X_train)
+    X_test_np = np.asarray(X_test)
+
+    var_filter = VarianceThreshold()
+    X_train_np = var_filter.fit_transform(X_train_np)
+    X_test_np = var_filter.transform(X_test_np)
+
+    selector = None
+    if X_train_np.shape[1] > prefilter_k:
+        selector = SelectKBest(score_func=f_classif, k=prefilter_k)
+        X_train_np = selector.fit_transform(X_train_np, y_train)
+        X_test_np = selector.transform(X_test_np)
+
+    return X_train_np, X_test_np, selector
+
+
+def run_baseline_prefilter_tabicl(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    prediction_model_type: str,
+    device: torch.device,
+    output_dir: Path,
+    cache_dir: Path | None,
+    model_dir: Path | None,
+    random_state: int,
+    prefilter_k: int = 1000,
+    baseline_k_cap: int = 100,
+) -> dict[str, Any]:
+    """Run baseline: VarianceThreshold -> SelectKBest (to <= baseline_k_cap) -> TabICL/etree evaluation."""
+    X_tr_pf, X_te_pf, selector = _apply_statistical_prefilter(X_train, X_test, y_train, prefilter_k=prefilter_k)
+
+    # Cap features to baseline_k_cap using SelectKBest (fit on train)
+    k_actual = min(baseline_k_cap, X_tr_pf.shape[1])
+    if X_tr_pf.shape[1] > k_actual:
+        cap_selector = SelectKBest(score_func=f_classif, k=k_actual)
+        X_tr_pf = cap_selector.fit_transform(X_tr_pf, y_train)
+        X_te_pf = cap_selector.transform(X_te_pf)
+    else:
+        X_te_pf = X_te_pf
+
+    # Train predictor and evaluate
+    model = fit_prediction_model(
+        X_tr_pf,
+        y_train,
+        prediction_model_type,
+        random_state,
+        {},
+        device=device,
+        cache_dir=cache_dir,
+        model_dir=model_dir,
+    )
+    train_metrics = evaluate_classifier(model, X_tr_pf, y_train)
+    test_metrics = evaluate_classifier(model, X_te_pf, y_test)
+
+    return {
+        "baseline_prefilter_features": int(X_tr_pf.shape[1]),
+        "baseline_train_auc": train_metrics.get("auc", np.nan),
+        "baseline_auc": test_metrics.get("auc", np.nan),
+        "baseline_train_accuracy": train_metrics.get("accuracy", np.nan),
+        "baseline_accuracy": test_metrics.get("accuracy", np.nan),
+    }
+
+
+def run_concrete_single_split(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    k: int,
+    prediction_model_type: str,
+    random_state: int,
+    device: torch.device,
+    prefilter_k: int = 1000,
+    num_epochs: int = 100,
+    cache_dir: Path | None = None,
+    model_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Run Concrete Autoencoder on a single train/test split then train TabICL on selected features."""
+    X_tr_pf, X_te_pf, _ = _apply_statistical_prefilter(X_train, X_test, y_train, prefilter_k=prefilter_k)
+
+    indices, loss_history, selector_obj = fit_concrete_selector(X_tr_pf, k=k, num_epochs=num_epochs)
+
+    X_tr_sel = X_tr_pf[:, indices]
+    X_te_sel = X_te_pf[:, indices]
+
+    # Fit predictor
+    model = fit_prediction_model(
+        X_tr_sel,
+        y_train,
+        prediction_model_type,
+        random_state,
+        {},
+        device=device,
+        cache_dir=cache_dir,
+        model_dir=model_dir,
+    )
+    train_metrics = evaluate_classifier(model, X_tr_sel, y_train)
+    test_metrics = evaluate_classifier(model, X_te_sel, y_test)
+
+    return {
+        "concrete_k": int(k),
+        "concrete_selected_count": int(len(indices)),
+        "concrete_train_loss_history": loss_history,
+        "concrete_train_auc": train_metrics.get("auc", np.nan),
+        "concrete_auc": test_metrics.get("auc", np.nan),
+        "concrete_train_accuracy": train_metrics.get("accuracy", np.nan),
+        "concrete_accuracy": test_metrics.get("accuracy", np.nan),
+    }
+
+
 def run_dataset_experiment(
     dataset_name: str,
     dataset: Any,
@@ -386,8 +537,11 @@ def run_dataset_experiment(
     lambda_values: list[float] | None = None,
     stg_lambda_values: list[float] | None = None,
     lspin_lambda_values: list[float] | None = None,
+    run_stg: bool = True,
+    run_lspin: bool = True,
     evaluation_mode: str = "full",
     prediction_model_type: str = "etree",
+    statistical_prefilter_k: int = 1000,
     use_peeling: bool = False,
     peeling_tau: int = 50,
     peeling_low_auc_threshold: float = 0.70,
@@ -487,10 +641,11 @@ def run_dataset_experiment(
                 k=k,
                 lambda_value=lambda_value,
                 lspin_lambda_value=lspin_lambda_value,
-                run_stg=stg_enabled,
-                run_lspin=lspin_enabled,
+                run_stg=stg_enabled and run_stg,
+                run_lspin=lspin_enabled and run_lspin,
                 evaluation_mode=evaluation_mode,
                 prediction_model_type=prediction_model_type,
+                statistical_prefilter_k=statistical_prefilter_k,
                 use_peeling=use_peeling,
                 peeling_tau=peeling_tau,
                 peeling_low_auc_threshold=peeling_low_auc_threshold,
@@ -517,3 +672,101 @@ def run_dataset_experiment(
     loss_history_df = expand_loss_histories(fold_df)
     summary_df = summarize_fold_results(fold_df)
     return summary_df, fold_df, loss_history_df
+
+
+def run_single_split_selector_experiment(
+    dataset_name: str,
+    dataset: Any,
+    output_dir: Path,
+    device: torch.device,
+    cache_dir: Path,
+    model_dir: Path,
+    random_state: int,
+    prediction_model_type: str,
+    selector_name: str,
+    concrete_k_values: list[int] | None = None,
+    concrete_epochs: int = 100,
+    concrete_prefilter_k: int = 1000,
+    baseline_postprefilter_k_cap: int = 100,
+) -> pd.DataFrame:
+    """Run Concrete or baseline selector sweeps on a single train/test split."""
+    X, y = extract_xy(dataset)
+    y_encoded, _ = encode_labels(y)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y_encoded,
+        test_size=0.2,
+        random_state=random_state,
+        stratify=y_encoded,
+    )
+
+    selector_key = selector_name.strip().lower()
+    rows: list[dict[str, Any]] = []
+
+    checkpoint_df = load_selector_checkpoint(output_dir, dataset_name, selector_key)
+    if not checkpoint_df.empty and not {"dataset", "selector"}.issubset(checkpoint_df.columns):
+        print(f"Selector checkpoint for {dataset_name}/{selector_key} is incompatible. Rebuilding from scratch.")
+        checkpoint_df = pd.DataFrame()
+
+    completed_keys: set[str] = set()
+    if not checkpoint_df.empty:
+        key_columns = ["dataset", "selector"]
+        if selector_key in {"concrete", "concrete_autoencoder"}:
+            key_columns.append("concrete_k")
+        completed_keys = {
+            "|".join(str(getattr(row, column)) for column in key_columns)
+            for row in checkpoint_df.itertuples(index=False)
+        }
+        rows.extend(checkpoint_df.to_dict(orient="records"))
+
+    if selector_key in {"concrete", "concrete_autoencoder"} and prediction_model_type != "tabiclv2":
+        raise ValueError("Concrete Autoencoder is only supported when prediction_model_type='tabiclv2'.")
+
+    if selector_key in {"concrete", "concrete_autoencoder"}:
+        for k in concrete_k_values or [10]:
+            current_key = "|".join([dataset_name, "concrete_autoencoder", str(int(k))])
+            if current_key in completed_keys:
+                continue
+
+            metrics = run_concrete_single_split(
+                X_train=X_train,
+                X_test=X_test,
+                y_train=y_train,
+                y_test=y_test,
+                k=int(k),
+                prediction_model_type=prediction_model_type,
+                random_state=random_state,
+                prefilter_k=concrete_prefilter_k,
+                num_epochs=concrete_epochs,
+                cache_dir=cache_dir,
+                model_dir=model_dir,
+                device=device,
+            )
+            rows.append({"dataset": dataset_name, "selector": "concrete_autoencoder", **metrics})
+            save_selector_checkpoint(output_dir, dataset_name, selector_key, pd.DataFrame(rows))
+
+        return pd.DataFrame(rows)
+
+    if selector_key in {"baseline", "prefilter_baseline", "variance_selectkbest_baseline"}:
+        current_key = "|".join([dataset_name, "baseline"])
+        if current_key not in completed_keys:
+            metrics = run_baseline_prefilter_tabicl(
+                X_train=X_train,
+                X_test=X_test,
+                y_train=y_train,
+                y_test=y_test,
+                prediction_model_type=prediction_model_type,
+                device=device,
+                output_dir=output_dir,
+                cache_dir=cache_dir,
+                model_dir=model_dir,
+                random_state=random_state,
+                prefilter_k=concrete_prefilter_k,
+                baseline_k_cap=baseline_postprefilter_k_cap,
+            )
+            rows.append({"dataset": dataset_name, "selector": "baseline", **metrics})
+            save_selector_checkpoint(output_dir, dataset_name, selector_key, pd.DataFrame(rows))
+
+        return pd.DataFrame(rows)
+
+    raise ValueError(f"Unsupported single-split selector: {selector_name}")

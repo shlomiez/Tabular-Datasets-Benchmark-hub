@@ -134,6 +134,14 @@ def _safe_filename(value: str) -> str:
     return "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in value).strip("_")
 
 
+def _coerce_optional_metric_column(frame: pd.DataFrame, candidate_columns: tuple[str, ...]) -> pd.Series:
+    """Return the first available metric column coerced to numeric, else NaNs."""
+    for column_name in candidate_columns:
+        if column_name in frame.columns:
+            return pd.to_numeric(frame[column_name], errors="coerce")
+    return pd.Series(np.nan, index=frame.index, dtype=float)
+
+
 def _load_concrete_metric_files(folder: Path) -> pd.DataFrame:
     """Combine all per-run concrete metric CSVs into a single dataframe."""
     metric_paths = sorted(folder.glob("*_concrete_metrics.csv"))
@@ -141,6 +149,24 @@ def _load_concrete_metric_files(folder: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
     frames = []
+    metric_aliases = {
+        "Accuracy": ("Accuracy", "concrete_accuracy"),
+        "AUC": ("AUC", "concrete_auc"),
+        "train_Accuracy": ("train_Accuracy", "Train_Accuracy", "concrete_train_accuracy"),
+        "train_AUC": ("train_AUC", "Train_AUC", "concrete_train_auc"),
+        "baseline_Accuracy": ("baseline_Accuracy", "Baseline_Accuracy", "baseline_accuracy"),
+        "baseline_AUC": ("baseline_AUC", "Baseline_AUC", "baseline_auc"),
+        "baseline_train_Accuracy": (
+            "baseline_train_Accuracy",
+            "Baseline_train_Accuracy",
+            "baseline_train_accuracy",
+        ),
+        "baseline_train_AUC": (
+            "baseline_train_AUC",
+            "Baseline_train_AUC",
+            "baseline_train_auc",
+        ),
+    }
     for metric_path in metric_paths:
         frame = pd.read_csv(metric_path)
         required_columns = {"dataset_name", "k_features"}
@@ -150,9 +176,8 @@ def _load_concrete_metric_files(folder: Path) -> pd.DataFrame:
         frame = frame.copy()
         frame.insert(0, "source_file", metric_path.name)
 
-        for column_name in ("Accuracy", "AUC"):
-            if column_name not in frame.columns:
-                frame[column_name] = np.nan
+        for canonical_name, candidate_columns in metric_aliases.items():
+            frame[canonical_name] = _coerce_optional_metric_column(frame, candidate_columns)
 
         frames.append(frame)
 
@@ -161,8 +186,17 @@ def _load_concrete_metric_files(folder: Path) -> pd.DataFrame:
 
     combined = pd.concat(frames, ignore_index=True)
     combined["k_features"] = pd.to_numeric(combined["k_features"], errors="coerce")
-    combined["Accuracy"] = pd.to_numeric(combined["Accuracy"], errors="coerce")
-    combined["AUC"] = pd.to_numeric(combined["AUC"], errors="coerce")
+    for column_name in (
+        "Accuracy",
+        "AUC",
+        "train_Accuracy",
+        "train_AUC",
+        "baseline_Accuracy",
+        "baseline_AUC",
+        "baseline_train_Accuracy",
+        "baseline_train_AUC",
+    ):
+        combined[column_name] = pd.to_numeric(combined[column_name], errors="coerce")
     combined = combined.dropna(subset=["dataset_name", "k_features"])
     combined = combined.sort_values(["dataset_name", "k_features"]).reset_index(drop=True)
     combined["k_features"] = combined["k_features"].astype(int)
@@ -170,48 +204,92 @@ def _load_concrete_metric_files(folder: Path) -> pd.DataFrame:
 
 
 def _plot_concrete_metric_trends(dataset_name: str, part: pd.DataFrame, plots_dir: Path) -> None:
-    """Plot Accuracy and AUC versus selected features for one dataset."""
+    """Plot AUC and Accuracy versus selected features for one dataset."""
     part = part.sort_values("k_features").copy()
     if part.empty:
         return
 
-    fig, ax = plt.subplots(figsize=(9, 5.5))
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    x_values = part["k_features"]
+    axis_specs = (
+        (axes[0], "AUC", "AUC"),
+        (axes[1], "Accuracy", "Accuracy"),
+    )
 
-    if part["Accuracy"].notna().any():
-        ax.plot(
-            part["k_features"],
-            part["Accuracy"],
-            marker="o",
-            linewidth=lw,
-            markersize=ms,
-            color="tab:blue",
-            label="Accuracy",
-        )
+    for axis, metric_label, metric_column in axis_specs:
+        plotted_any = False
+        baseline_train_column = f"baseline_train_{metric_column}"
+        baseline_test_column = f"baseline_{metric_column}"
+        train_column = f"train_{metric_column}"
 
-    if part["AUC"].notna().any():
-        ax.plot(
-            part["k_features"],
-            part["AUC"],
-            marker="s",
-            linewidth=lw,
-            markersize=ms,
-            color="tab:orange",
-            label="AUC",
-        )
+        if part[baseline_train_column].notna().any():
+            axis.plot(
+                x_values,
+                part[baseline_train_column],
+                marker="o",
+                linestyle="-",
+                linewidth=lw,
+                markersize=ms,
+                color="tab:green",
+                label="Train - Baseline",
+            )
+            plotted_any = True
 
-    ax.set_title(f"{dataset_name}: Concrete Autoencoder Performance", fontsize=fs_title, fontweight="bold")
-    ax.set_xlabel("Selected features (k)", fontsize=fs_label, fontweight="bold")
-    ax.set_ylabel("Score", fontsize=fs_label, fontweight="bold")
-    ax.set_xticks(part["k_features"].tolist())
+        if part[train_column].notna().any():
+            axis.plot(
+                x_values,
+                part[train_column],
+                marker="s",
+                linestyle="-",
+                linewidth=lw,
+                markersize=ms,
+                color="tab:orange",
+                label="Train - Concrete AE",
+            )
+            plotted_any = True
 
-    metric_values = part[["Accuracy", "AUC"]].to_numpy(dtype=float)
-    finite_values = metric_values[np.isfinite(metric_values)]
-    y_max = 1.0 if finite_values.size == 0 else max(1.0, float(finite_values.max()) * 1.1)
-    ax.set_ylim(0, y_max)
+        if part[baseline_test_column].notna().any():
+            axis.plot(
+                x_values,
+                part[baseline_test_column],
+                marker="o",
+                linestyle="--",
+                linewidth=lw,
+                markersize=ms,
+                color="tab:green",
+                label="Test - Baseline",
+            )
+            plotted_any = True
 
-    ax.tick_params(axis="both", labelsize=fs_tick)
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=fs_legend)
+        if part[metric_column].notna().any():
+            axis.plot(
+                x_values,
+                part[metric_column],
+                marker="s",
+                linestyle="--",
+                linewidth=lw,
+                markersize=ms,
+                color="tab:orange",
+                label="Test - Concrete AE",
+            )
+            plotted_any = True
+
+        axis.set_title(f"{dataset_name}: {metric_label}", fontsize=fs_title, fontweight="bold")
+        axis.set_xlabel("Selected features (k)", fontsize=fs_label, fontweight="bold")
+        axis.set_ylabel(metric_label, fontsize=fs_label, fontweight="bold")
+        axis.set_xticks(x_values.tolist())
+
+        metric_values = part[
+            [metric_column, train_column, baseline_test_column, baseline_train_column]
+        ].to_numpy(dtype=float)
+        finite_values = metric_values[np.isfinite(metric_values)]
+        y_max = 1.0 if finite_values.size == 0 else max(1.0, float(finite_values.max()) * 1.1)
+        axis.set_ylim(0, y_max)
+
+        axis.tick_params(axis="both", labelsize=fs_tick)
+        axis.grid(True, alpha=0.3)
+        if plotted_any:
+            axis.legend(fontsize=fs_legend, loc="best")
 
     fig.tight_layout()
     plot_path = plots_dir / f"{_safe_filename(dataset_name)}_concrete_performance.png"
@@ -234,7 +312,22 @@ def plot_concrete_results(input_dir: str):
     summary_csv_path = folder / "concrete_metrics_summary.csv"
     combined_df.to_csv(summary_csv_path, index=False)
 
-    plots_dir = folder / "plots_concrete_summary"
+    has_train_metrics = combined_df[["train_Accuracy", "train_AUC"]].notna().any().any()
+    has_baseline_metrics = combined_df[
+        [
+            "baseline_Accuracy",
+            "baseline_AUC",
+            "baseline_train_Accuracy",
+            "baseline_train_AUC",
+        ]
+    ].notna().any().any()
+
+    if not has_train_metrics:
+        print("Train metrics unavailable in concrete CSVs; plotting test metrics only.")
+    if not has_baseline_metrics:
+        print("Baseline etree/no-FS metrics unavailable in concrete CSVs; plotting without baseline.")
+
+    plots_dir = folder / "edited_plots" / "concrete_summary"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     for dataset_name, part in combined_df.groupby("dataset_name", sort=True):

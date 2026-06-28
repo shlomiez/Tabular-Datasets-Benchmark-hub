@@ -37,12 +37,24 @@ class ExperimentConfig:
     seed: int = 42
     n_splits: int = 5
     feature_selection_method: str = "lamda_tuning"
+    # Feature selector(s) to evaluate. Can contain multiple algorithms, similar to dataset_names.
+    feature_selectors: list[str] = field(default_factory=lambda: ["stg", "lspin"])
     evaluation_mode: str = "full"
     prediction_model_type: str = "tabiclv2"
     dataset_names: list[str] = field(default_factory=lambda: ["RELATHE"])
     feature_ratios: list[float] = field(
         default_factory=lambda: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05]
     )
+    # Concrete Autoencoder settings (optional)
+    concrete_k_values: list[int] = field(default_factory=lambda: [10])
+    concrete_epochs: int = 100
+    concrete_prefilter_k: int = 1000
+
+    # Baseline ablation: cap features after SelectKBest for a lightweight TabICL run
+    baseline_postprefilter_k_cap: int = 100
+
+    # Split policy: 'cv' (use n_splits) or 'single' (train_test_split)
+    split_policy: str = "cv"
     lambda_values: list[float] = field(default_factory=lambda: [0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0])
     lambda_ranges_by_dataset: dict[str, dict[str, list[float]]] = field(
         default_factory=lambda: {
