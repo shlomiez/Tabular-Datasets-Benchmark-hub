@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-07-01_01-04-26",
+  "args": {
+    "data_path": "data/spiked_covariance_dataset(200,5000,50).npz",
+    "seed": 42,
+    "output_dir": "output",
+    "sa_iters": 40,
+    "sa_temp0": 1.0,
+    "sa_temp_min": 0.001,
+    "ga_pop_size": 20,
+    "ga_generations": 6,
+    "ga_cxpb": 0.8,
+    "ga_mutpb": null
+  },
+  "winner": "Genetic Algorithm",
+  "winner_reason": "Both best solutions are feasible; GA has lower auc_all.",
+  "simulated_annealing": {
+    "best": {
+      "cost": 0.7068,
+      "auc_all": 0.7068,
+      "auc_gt": 0.976,
+      "size_penalty": 0.0,
+      "balance_penalty": 0.0,
+      "gt_penalty": 0.0,
+      "selected_size": 70,
+      "positive_ratio": 0.44285714285714284,
+      "minority_ratio": 0.44285714285714284
+    },
+    "best_feasible": {
+      "cost": 0.7068,
+      "auc_all": 0.7068,
+      "auc_gt": 0.976,
+      "size_penalty": 0.0,
+      "balance_penalty": 0.0,
+      "gt_penalty": 0.0,
+      "selected_size": 70,
+      "positive_ratio": 0.44285714285714284,
+      "minority_ratio": 0.44285714285714284
+    }
+  },
+  "genetic_algorithm": {
+    "best": {
+      "cost": 0.5212,
+      "auc_all": 0.5212,
+      "auc_gt": 0.9692000000000001,
+      "size_penalty": 0.0,
+      "balance_penalty": 0.0,
+      "gt_penalty": 0.0,
+      "selected_size": 55,
+      "positive_ratio": 0.45454545454545453,
+      "minority_ratio": 0.45454545454545453
+    },
+    "best_feasible": {
+      "cost": 0.5212,
+      "auc_all": 0.5212,
+      "auc_gt": 0.9692000000000001,
+      "size_penalty": 0.0,
+      "balance_penalty": 0.0,
+      "gt_penalty": 0.0,
+      "selected_size": 55,
+      "positive_ratio": 0.45454545454545453,
+      "minority_ratio": 0.45454545454545453
+    }
+  }
+}
