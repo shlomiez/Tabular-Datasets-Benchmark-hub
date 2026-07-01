@@ -20,10 +20,15 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from scipy.io import loadmat
 from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 from sklearn.model_selection import train_test_split
+from sklearn.svm import LinearSVC
+from tqdm import tqdm
 
 from src.model_training import compute_auc
+from src.data_preprocessing import load_dataset_xy
 from src.utils import ensure_dir, set_global_seed
 
 
@@ -63,9 +68,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--data-path",
-        type=str,
-        default="data/spiked_covariance_dataset(200,5000,50).npz",
-        help="Path to .npz containing X, y, gt_indices.",
+        nargs="+",
+        default=["data/spiked_covariance_dataset(200,5000,50).npz"],
+        help="Path to dataset file (.npz or .mat).",
     )
     parser.add_argument("--seed", type=int, default=42, help="Global random seed.")
     parser.add_argument(
@@ -97,18 +102,43 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_data(npz_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if not npz_path.exists():
-        raise FileNotFoundError(f"Dataset not found: {npz_path}")
+def resolve_data_path_arg(data_path_tokens: list[str]) -> Path:
+    # Support unquoted paths with spaces by joining all tokens after --data-path.
+    joined = " ".join(data_path_tokens)
+    return Path(joined).expanduser().resolve()
 
-    data = np.load(npz_path)
-    missing = [k for k in ("X", "y", "gt_indices") if k not in data]
-    if missing:
-        raise KeyError(f"Missing key(s) in NPZ: {missing}")
 
-    X = np.asarray(data["X"])
-    y = np.asarray(data["y"])
-    gt_indices = np.asarray(data["gt_indices"], dtype=np.int64)
+def _infer_gt_indices(path: Path) -> np.ndarray | None:
+    candidate_keys = ("gt_indices", "gt_idx", "support", "relevant_features", "feature_indices")
+
+    if path.suffix.lower() == ".npz":
+        with np.load(path, allow_pickle=False) as data:
+            for key in candidate_keys:
+                if key in data:
+                    return np.asarray(data[key], dtype=np.int64).reshape(-1)
+
+    if path.suffix.lower() == ".mat":
+        mat = loadmat(path)
+        for key in candidate_keys:
+            if key in mat:
+                return np.asarray(mat[key], dtype=np.int64).reshape(-1)
+
+    # No known GT support metadata found.
+    return None
+
+
+def load_data(dataset_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+
+    suffix = dataset_path.suffix.lower()
+    if suffix not in {".npz", ".mat"}:
+        raise ValueError(f"Unsupported dataset format: {dataset_path.name}. Use .npz or .mat")
+
+    X, y = load_dataset_xy(dataset_path)
+    X = np.asarray(X)
+    y = np.asarray(y).reshape(-1)
+    gt_indices = _infer_gt_indices(dataset_path)
 
     if X.ndim != 2:
         raise ValueError(f"X must be 2D, got shape {X.shape}")
@@ -116,12 +146,13 @@ def load_data(npz_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         raise ValueError(f"y must be 1D, got shape {y.shape}")
     if X.shape[0] != y.shape[0]:
         raise ValueError(f"X rows ({X.shape[0]}) and y length ({y.shape[0]}) must match")
-    if gt_indices.ndim != 1:
-        raise ValueError(f"gt_indices must be 1D, got shape {gt_indices.shape}")
-    if gt_indices.size == 0:
-        raise ValueError("gt_indices is empty")
-    if np.any(gt_indices < 0) or np.any(gt_indices >= X.shape[1]):
-        raise ValueError("gt_indices contains out-of-range feature indices")
+    if gt_indices is not None:
+        if gt_indices.ndim != 1:
+            raise ValueError(f"gt_indices must be 1D, got shape {gt_indices.shape}")
+        if gt_indices.size == 0:
+            raise ValueError("gt_indices is empty")
+        if np.any(gt_indices < 0) or np.any(gt_indices >= X.shape[1]):
+            raise ValueError("gt_indices contains out-of-range feature indices")
 
     classes, y_encoded = np.unique(y, return_inverse=True)
     if classes.size != 2:
@@ -130,6 +161,64 @@ def load_data(npz_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         )
 
     return X, y_encoded.astype(np.int64), gt_indices
+
+
+def recover_gt_indices_from_fs(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    seed: int,
+    max_k: int = 60,
+) -> np.ndarray:
+    """Recover proxy GT indices by choosing FS subset with best Dtest AUC."""
+    n_features = X_train.shape[1]
+    if n_features == 0:
+        raise ValueError("Cannot recover gt_indices from an empty feature matrix")
+
+    if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
+        return np.arange(n_features, dtype=np.int64)
+
+    k = max(1, min(max_k, n_features))
+    best_auc = -1.0
+    best_indices = np.arange(n_features, dtype=np.int64)
+
+    selectors: list[tuple[str, np.ndarray]] = []
+
+    skb_f = SelectKBest(score_func=f_classif, k=k)
+    skb_f.fit(X_train, y_train)
+    selectors.append(("f_classif", skb_f.get_support(indices=True)))
+
+    skb_mi = SelectKBest(score_func=mutual_info_classif, k=k)
+    skb_mi.fit(X_train, y_train)
+    selectors.append(("mutual_info", skb_mi.get_support(indices=True)))
+
+    et = ExtraTreesClassifier(
+        n_estimators=200,
+        random_state=seed,
+        class_weight="balanced",
+        n_jobs=-1,
+    )
+    et.fit(X_train, y_train)
+    et_idx = np.argsort(et.feature_importances_)[-k:]
+    selectors.append(("etree_importance", np.sort(et_idx.astype(np.int64))))
+
+    svc = LinearSVC(penalty="l1", dual=False, random_state=seed, max_iter=50000)
+    svc.fit(X_train, y_train)
+    svc_scores = np.abs(np.ravel(svc.coef_))
+    svc_idx = np.argsort(svc_scores)[-k:]
+    selectors.append(("linear_svc_l1", np.sort(svc_idx.astype(np.int64))))
+
+    for _, idx in selectors:
+        idx = np.asarray(idx, dtype=np.int64)
+        if idx.size == 0:
+            continue
+        auc = fit_etree_auc(X_train[:, idx], y_train, X_test[:, idx], y_test)
+        if auc > best_auc:
+            best_auc = auc
+            best_indices = idx
+
+    return np.unique(best_indices.astype(np.int64))
 
 
 def split_pool_test(
@@ -257,7 +346,7 @@ def optimize_simulated_annealing(
     best_feasible_w = current_w.copy() if current_eval.is_feasible else None
     best_feasible_eval = current_eval if current_eval.is_feasible else None
 
-    for idx in range(iters):
+    for idx in tqdm(range(iters), desc="Simulated Annealing", unit="iter"):
         frac = idx / max(1, iters - 1)
         temp = temp0 * ((temp_min / temp0) ** frac)
         temp = max(temp, 1e-12)
@@ -354,7 +443,7 @@ def optimize_genetic_algorithm(
                 best_feasible_w = ind.copy()
                 best_feasible_eval = ind_eval
 
-    for _ in range(generations):
+    for _ in tqdm(range(generations), desc="Genetic Algorithm", unit="gen"):
         elite_idx = int(np.argmin([e.cost for e in evals]))
         elite = pop[elite_idx].copy()
 
@@ -512,17 +601,30 @@ def main() -> None:
     args = parse_args()
     set_global_seed(args.seed)
 
-    data_path = Path(args.data_path).expanduser().resolve()
+    data_path = resolve_data_path_arg(args.data_path)
     output_dir = Path(args.output_dir).expanduser().resolve()
 
     X, y, gt_indices = load_data(data_path)
     X_pool, X_test, y_pool, y_test = split_pool_test(X, y, args.seed)
+
+    gt_source = "metadata"
+    if gt_indices is None:
+        print("No gt_indices metadata found. Running Ground Truth Recovery via feature selection...")
+        gt_indices = recover_gt_indices_from_fs(
+            X_train=X_pool,
+            y_train=y_pool,
+            X_test=X_test,
+            y_test=y_test,
+            seed=args.seed,
+        )
+        gt_source = "recovered_fs"
 
     print("Loaded dataset and split into optimization pool/test")
     print(f"  data_path   : {data_path}")
     print(f"  X shape     : {X.shape}")
     print(f"  y classes   : {np.unique(y).tolist()}")
     print(f"  gt_count    : {gt_indices.size}")
+    print(f"  gt_source   : {gt_source}")
     print(f"  pool size   : {X_pool.shape[0]}")
     print(f"  test size   : {X_test.shape[0]}")
 
