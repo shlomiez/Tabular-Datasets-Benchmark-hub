@@ -49,7 +49,7 @@ def run_pipeline(config_path: str, resume_output_dir_override: str) -> Dict[str,
     concrete_device = str(config.get('concrete_device', 'cpu')).strip().lower()
     resume_output_dir = resume_output_dir_override or config.get('resume_output_dir', None)
     resume_from_checkpoints = bool(config.get('resume_from_checkpoints', True))
-    skip_completed = bool(config.get('skip_completed', True))
+    skip_completed = bool(config.get('skip_completed', False))
 
     if concrete_device not in {'cpu', 'gpu', 'auto'}:
         raise ValueError("config.yml option 'concrete_device' must be one of: cpu, gpu, auto")
@@ -92,13 +92,15 @@ def run_pipeline(config_path: str, resume_output_dir_override: str) -> Dict[str,
     # 2. Setup Output Directories (Similar to main.py / pipeline.py)
     base_dir = Path.cwd()
     paths = resolve_paths(base_dir=base_dir)
-    if resume_output_dir:
-        output_dir = ensure_dir(Path(resume_output_dir).expanduser().resolve())
-        print(f"Resuming concrete run in existing output directory: {output_dir}")
-    else:
-        output_dir = ensure_dir(paths.run_output_dir)
+    output_dir = ensure_dir(paths.run_output_dir)
     plots_dir = ensure_dir(output_dir / "plots")
     checkpoints_dir = ensure_dir(output_dir / "checkpoints")
+    checkpoint_source_checkpoints_dir: Path | None = None
+    if resume_output_dir:
+        checkpoint_source_dir = Path(resume_output_dir).expanduser().resolve()
+        checkpoint_source_checkpoints_dir = checkpoint_source_dir / "checkpoints"
+        print(f"Checkpoint source directory: {checkpoint_source_dir}")
+        print(f"Writing resumed run outputs to new directory: {output_dir}")
 
     config_source_path = Path(config_path).resolve()
     if config_source_path.exists():
@@ -141,16 +143,7 @@ def run_pipeline(config_path: str, resume_output_dir_override: str) -> Dict[str,
     loss_rows: list[dict[str, Any]] = []
 
     summary_csv = output_dir / "iterative_feature_curve_summary.csv"
-    if summary_csv.exists():
-        existing_summary_df = pd.read_csv(summary_csv)
-        if not existing_summary_df.empty:
-            concrete_rows.extend(existing_summary_df.to_dict(orient="records"))
-
     loss_csv = output_dir / "iterative_feature_curve_loss_history.csv"
-    if loss_csv.exists():
-        existing_loss_df = pd.read_csv(loss_csv)
-        if not existing_loss_df.empty:
-            loss_rows.extend(existing_loss_df.to_dict(orient="records"))
 
     completed_keys: set[tuple[str, int]] = set()
     for row in concrete_rows:
@@ -228,13 +221,17 @@ def run_pipeline(config_path: str, resume_output_dir_override: str) -> Dict[str,
 
             checkpoint_path = checkpoints_dir / f"{dataset_name}_k{cae_k}_concrete_autoencoder.keras"
             indices_path = checkpoints_dir / f"{dataset_name}_k{cae_k}_indices.npy"
+            source_indices_path = indices_path
+            if checkpoint_source_checkpoints_dir is not None:
+                source_indices_path = checkpoint_source_checkpoints_dir / indices_path.name
             checkpoint_status = "saved"
             history = None
 
-            if resume_from_checkpoints and indices_path.exists():
-                indices = np.load(indices_path).astype(int)
+            if resume_from_checkpoints and source_indices_path.exists():
+                indices = np.load(source_indices_path).astype(int)
+                np.save(indices_path, np.asarray(indices, dtype=np.int64))
                 checkpoint_status = "loaded_indices"
-                print(f"Loaded feature indices from checkpoint: {indices_path.name}")
+                print(f"Loaded feature indices from checkpoint: {source_indices_path.name}")
             else:
                 # Fit strictly on training data (Autoencoder reconstructs X_train)
                 try:
@@ -458,7 +455,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resume-output-dir",
         default=None,
-        help="Existing output directory to resume from using saved checkpoints",
+        help="Existing run directory used only as checkpoint source; results are written to a new output directory",
     )
     args = parser.parse_args()
 
