@@ -97,8 +97,8 @@ def plot_loss_curves(dataset_name, loss_part, plots_dir, suffix):
 
 def plot_lambda_tuning_features(dataset_name, part, plots_dir):
     """Generate and save selected features vs lambda plot."""
-    stg_lambdas = part["lambda_value"]
-    lspin_lambdas = part.get("lspin_lambda_value", part["lambda_value"])
+    stg_lambdas = part["stg_lambda_value"]
+    lspin_lambdas = part.get("lspin_lambda_value", part["stg_lambda_value"])
     
     # Selected Features Plot
     fig_sel, axes_sel = plt.subplots(1, 2, figsize=(16, 6))
@@ -394,7 +394,7 @@ def plot_results(input_dir: str):
         x_scale = "linear"
         suffix = "feature_ratio"
     else:
-        sort_col = "lambda_value"
+        sort_col = "stg_lambda_value"
         x_label = "Number of Selected Features (Gate > 0)"
         x_scale = "linear"
         suffix = "num_features"
@@ -446,7 +446,7 @@ def plot_results(input_dir: str):
 
         # ---- 3. Lambda Tuning Features Plot ----
         if current_method in ["lamda_tuning", "lambda_tuning"] and {
-            "stg_selected_features_mean", "lspin_selected_features_mean", "lambda_value"
+            "stg_selected_features_mean", "lspin_selected_features_mean", "stg_lambda_value"
         }.issubset(part.columns):
             plot_lambda_tuning_features(dataset_name, part, plots_dir)
 

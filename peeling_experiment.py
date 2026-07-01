@@ -176,7 +176,7 @@ def main():
     tau = config_data.get("peeling_tau", 50)
     low_auc = config_data.get("peeling_low_auc_threshold", 0.70)
     
-    target_datasets = ["RELATHE", "SMK-CAN-187"]
+    target_datasets = ["Synthetic"]
     data_root = Path("data")
     dataset_paths = build_dataset_paths(data_root)
     
@@ -194,7 +194,7 @@ def main():
     if results:
         df_results = pd.DataFrame(results)
         date_and_time = pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_dir = Path("output")
+        output_dir = Path("output/peeling_experiment")
         output_dir.mkdir(exist_ok=True)
         csv_path = output_dir / f"peeling_experiment_results_{date_and_time}.csv"
         df_results.to_csv(csv_path, index=False)

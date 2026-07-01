@@ -1,6 +1,9 @@
 """CLI entry point for the refactored thesis feature-selection pipeline."""
-
 from __future__ import annotations
+
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 import argparse
 from pathlib import Path
@@ -18,7 +21,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resume-output-dir",
         default=None,
-        help="Existing output directory to resume from using saved checkpoints",
+        help="Existing run directory used only as checkpoint source; results are written to a new output directory",
     )
     return parser.parse_args()
 

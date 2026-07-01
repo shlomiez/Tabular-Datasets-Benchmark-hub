@@ -1,5 +1,6 @@
 /output/
 src/__pycache__/
+.github/
 *.err
 *.csv
 *.out

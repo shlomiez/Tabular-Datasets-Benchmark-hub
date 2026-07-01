@@ -4,34 +4,35 @@
 use_peeling: false
 peeling_tau: 50
 peeling_low_auc_threshold: 0.70
-resume_output_dir: "/home/fast/ezrashl1/Tabular-Datasets-Benchmark-hub/output/2026-06-25_00-36-53"
+# resume_output_dir: "/home/fast/ezrashl1/Tabular-Datasets-Benchmark-hub/output/2026-06-25_00-36-53"
 seed: 42
 n_splits: 5
 
 # Options: "features_ratio", "lamda_tuning"
-feature_selection_method: features_ratio
+feature_selection_method: lambda_tuning
 
 # Feature selectors to evaluate; can include multiple entries like dataset_names.
 # Options include: "stg", "lspin", "concrete_autoencoder"
 feature_selectors:
-  # - stg
-  # - lspin
-  - concrete_autoencoder
+  - stg
+  - lspin
+  # - concrete_autoencoder
 
 # Options: "etree", "tabiclv2"
-prediction_model_type: tabiclv2
+prediction_model_type: etree
 
 # Options: "full", "selector_only"
 evaluation_mode: full
 
 # Datasets to run, e.g. ["RELATHE", "madelon"]
 dataset_names:
-  - Breast
-  - madelon
-  - colon
-  - SMK-CAN-187
-  - RELATHE
-  - leukemia
+  # - Breast
+  # - madelon
+  # - colon
+  # - SMK-CAN-187
+  # - RELATHE
+  # - leukemia
+  - Synthetic
 
 # Feature ratios to evaluate
 feature_ratios: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05]
@@ -47,6 +48,9 @@ lambda_ranges_by_dataset:
   RELATHE:
     stg: [10.0, 10.916, 11.916, 13.007, 14.198, 15.498, 17.0]
     lspin: [0.03, 0.129, 0.554, 2.381, 10.233, 43.989, 200.0]
+  Synthetic:
+    stg: [1.0, 2.0, 3.0, 4.0, 5.0, 25.0, 50.0]
+    lspin: [0.1, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0]
 
 # --- Concrete Autoencoder & TabICL Pipeline Settings ---
 # Use dataset_names for .mat datasets in data/; dataset_path is optional for a single CSV/.mat file.
