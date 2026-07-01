@@ -19,9 +19,53 @@ from src.feature_selection import fit_concrete_selector
 from typing import Tuple
 
 
-def checkpoint_key(dataset_name: str, feature_selection_method: str, selection_value: str, fold_index: int) -> str:
+def _is_nan(value: Any) -> bool:
+    """Return True when value is None/NaN-like."""
+    return value is None or (pd.isna(value) if not isinstance(value, str) else False)
+
+
+def _format_key_part(value: Any) -> str:
+    """Format key values consistently for stable checkpoint identity."""
+    if _is_nan(value):
+        return "nan"
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return f"{float(value):.12g}"
+    return str(value)
+
+
+def _parse_legacy_selection(selection_value: Any, feature_selection_method: str) -> tuple[Any, float | None, float | None]:
+    """Parse legacy selection_value strings from older checkpoints."""
+    if feature_selection_method == "lamda_tuning":
+        if isinstance(selection_value, str) and selection_value.startswith("stg=") and "|lspin=" in selection_value:
+            stg_part, lspin_part = selection_value.split("|lspin=", maxsplit=1)
+            try:
+                return None, float(stg_part.replace("stg=", "", 1)), float(lspin_part)
+            except ValueError:
+                return None, None, None
+        return None, None, None
+
+    if isinstance(selection_value, str) and selection_value.startswith("ratio="):
+        try:
+            return float(selection_value.replace("ratio=", "", 1)), None, None
+        except ValueError:
+            return selection_value, None, None
+    return selection_value, None, None
+
+
+def checkpoint_key(
+    dataset_name: str,
+    feature_selection_method: str,
+    fold_index: int,
+    selection_value: Any = None,
+    stg_lambda_value: float | None = None,
+    lspin_lambda_value: float | None = None,
+) -> str:
     """Build stable key for checkpointed fold jobs."""
-    return f"{dataset_name}|{feature_selection_method}|{selection_value}|{fold_index}"
+    if feature_selection_method == "lamda_tuning":
+        selection_part = f"stg={_format_key_part(stg_lambda_value)}|lspin={_format_key_part(lspin_lambda_value)}"
+    else:
+        selection_part = f"selection={_format_key_part(selection_value)}"
+    return f"{dataset_name}|{feature_selection_method}|{selection_part}|{fold_index}"
 
 
 def get_checkpoint_path(output_dir: Path, dataset_name: str) -> Path:
@@ -74,7 +118,7 @@ def expand_loss_histories(fold_df: pd.DataFrame) -> pd.DataFrame:
             "selection_value": str(getattr(row, "selection_value", "")),
             "stg_feature_ratio": float(getattr(row, "stg_feature_ratio", np.nan)),
             "lspin_feature_ratio": float(getattr(row, "lspin_feature_ratio", np.nan)),
-            "lambda_value": float(getattr(row, "lambda_value", np.nan)),
+            "stg_lambda_value": float(getattr(row, "stg_lambda_value", np.nan)),
             "lspin_lambda_value": float(getattr(row, "lspin_lambda_value", np.nan)),
         }
 
@@ -96,7 +140,7 @@ def summarize_fold_results(fold_df: pd.DataFrame) -> pd.DataFrame:
         "dataset",
         "feature_selection_method",
         "selection_value",
-        "lambda_value",
+        "stg_lambda_value",
         "lspin_lambda_value",
         "p",
     ]
@@ -106,7 +150,7 @@ def summarize_fold_results(fold_df: pd.DataFrame) -> pd.DataFrame:
             dataset_name,
             feature_selection_method,
             selection_value,
-            lambda_value,
+            stg_lambda_value,
             lspin_lambda_value,
             p,
         ) = keys
@@ -126,7 +170,7 @@ def summarize_fold_results(fold_df: pd.DataFrame) -> pd.DataFrame:
                 "selection_value": selection_value,
                 "stg_feature_ratio": stg_feature_ratio_value,
                 "lspin_feature_ratio": lspin_feature_ratio_value,
-                "lambda_value": float(lambda_value) if pd.notna(lambda_value) else np.nan,
+                "stg_lambda_value": float(stg_lambda_value) if pd.notna(stg_lambda_value) else np.nan,
                 "lspin_lambda_value": float(lspin_lambda_value) if pd.notna(lspin_lambda_value) else np.nan,
                 "p": int(p),
                 "stg_k": stg_k_value,
@@ -177,7 +221,7 @@ def run_fold_experiment(
     prediction_model_type: str = "etree",
     statistical_prefilter_k: int = 1000,
     k: int | None = None,
-    lambda_value: float | None = None,
+    stg_lambda_value: float | None = None,
     lspin_lambda_value: float | None = None,
     run_stg: bool = True,
     run_lspin: bool = True,
@@ -187,6 +231,11 @@ def run_fold_experiment(
     peeling_low_auc_threshold: float = 0.70,
 ) -> dict[str, Any]:
     """Run one CV fold across baseline and optional feature selectors."""
+    print(
+        f"[Fold {fold_index}] Starting | dataset={dataset_name} | method={feature_selection_method} "
+        f"| selection={selection_value}"
+    )
+
     if evaluation_mode not in {"full", "selector_only"}:
         raise ValueError("evaluation_mode must be either 'full' or 'selector_only'.")
 
@@ -210,6 +259,7 @@ def run_fold_experiment(
         )
 
     if evaluation_mode == "full":
+        print(f"[Fold {fold_index}] Baseline training started ({prediction_model_type}).")
         baseline_model = fit_prediction_model(
             X_train_scaled,
             y_train,
@@ -222,6 +272,10 @@ def run_fold_experiment(
         )
         baseline_train_metrics = evaluate_classifier(baseline_model, X_train_scaled, y_train)
         baseline_metrics = evaluate_classifier(baseline_model, X_test_scaled, y_test)
+        print(
+            f"[Fold {fold_index}] Baseline complete | "
+            f"AUC={baseline_metrics['auc']:.4f} | ACC={baseline_metrics['accuracy']:.4f}"
+        )
     else:
         baseline_train_metrics = {"auc": np.nan, "accuracy": np.nan}
         baseline_metrics = {"auc": np.nan, "accuracy": np.nan}
@@ -230,15 +284,16 @@ def run_fold_experiment(
     lspin_cfg = dict(lspin_params)
 
     if feature_selection_method == "lamda_tuning":
-        if lambda_value is None:
-            raise ValueError("lambda_value is required when feature_selection_method='lamda_tuning'.")
-        stg_cfg["lam"] = float(lambda_value)
-        lspin_cfg["lam"] = float(lspin_lambda_value if lspin_lambda_value is not None else lambda_value)
+        if stg_lambda_value is None:
+            raise ValueError("stg_lambda_value is required when feature_selection_method='lamda_tuning'.")
+        stg_cfg["lam"] = float(stg_lambda_value)
+        lspin_cfg["lam"] = float(lspin_lambda_value if lspin_lambda_value is not None else stg_lambda_value)
 
     if lspin_cfg.get("batch_size", 64) == -1:
         lspin_cfg["batch_size"] = X_train_scaled.shape[0]
 
     if run_stg:
+        print(f"[Fold {fold_index}] STG selector training started.")
         stg_features, stg_train_loss_history, stg_active_count = fit_stg_selector(
             X_train_scaled,
             y_train,
@@ -252,7 +307,12 @@ def run_fold_experiment(
             stg_features = [0]
             stg_active_count = 0
 
+        print(
+            f"[Fold {fold_index}] STG selector complete | selected={int(stg_active_count)}"
+        )
+
         if evaluation_mode == "full":
+            print(f"[Fold {fold_index}] STG downstream model training started ({prediction_model_type}).")
             stg_model = fit_prediction_model(
                 X_train_scaled[:, stg_features],
                 y_train,
@@ -265,6 +325,10 @@ def run_fold_experiment(
             )
             stg_train_metrics = evaluate_classifier(stg_model, X_train_scaled[:, stg_features], y_train)
             stg_metrics = evaluate_classifier(stg_model, X_test_scaled[:, stg_features], y_test)
+            print(
+                f"[Fold {fold_index}] STG downstream complete | "
+                f"AUC={stg_metrics['auc']:.4f} | ACC={stg_metrics['accuracy']:.4f}"
+            )
         else:
             stg_train_metrics = {"auc": np.nan, "accuracy": np.nan}
             stg_metrics = {"auc": np.nan, "accuracy": np.nan}
@@ -275,6 +339,7 @@ def run_fold_experiment(
         stg_metrics = {"auc": np.nan, "accuracy": np.nan}
 
     if run_lspin:
+        print(f"[Fold {fold_index}] LSPIN selector training started.")
         lspin_features, lspin_train_loss_history, lspin_mean_active_count, lspin_model_obj = fit_lspin_selector(
             X_train_scaled,
             y_train,
@@ -282,6 +347,10 @@ def run_fold_experiment(
             random_state=random_state,
             feature_selection_method=feature_selection_method,
             **lspin_cfg,
+        )
+
+        print(
+            f"[Fold {fold_index}] LSPIN selector complete | selected_mean={float(lspin_mean_active_count):.2f}"
         )
 
         train_gate_matrix = lspin_model_obj.get_prob_alpha(
@@ -302,6 +371,7 @@ def run_fold_experiment(
 
         X_train_lspin_pruned = X_train_lspin_masked[:, active_cols]
         if evaluation_mode == "full":
+            print(f"[Fold {fold_index}] LSPIN downstream model training started ({prediction_model_type}).")
             lspin_model_pred = fit_prediction_model(
                 X_train_lspin_pruned,
                 y_train,
@@ -330,6 +400,10 @@ def run_fold_experiment(
         X_test_lspin_pruned = X_test_lspin_masked[:, active_cols]
         if evaluation_mode == "full":
             lspin_metrics = evaluate_classifier(lspin_model_pred, X_test_lspin_pruned, y_test)
+            print(
+                f"[Fold {fold_index}] LSPIN downstream complete | "
+                f"AUC={lspin_metrics['auc']:.4f} | ACC={lspin_metrics['accuracy']:.4f}"
+            )
         else:
             lspin_metrics = {"auc": np.nan, "accuracy": np.nan}
     else:
@@ -348,6 +422,11 @@ def run_fold_experiment(
     stg_feature_ratio = float(stg_k / p) if p > 0 else np.nan
     lspin_feature_ratio = float(lspin_k / p) if p > 0 else np.nan
 
+    print(
+        f"[Fold {fold_index}] Done | baseline_auc={baseline_metrics['auc']:.4f} "
+        f"| stg_auc={stg_metrics['auc']:.4f} | lspin_auc={lspin_metrics['auc']:.4f}"
+    )
+
     return {
         "dataset": dataset_name,
         "fold": fold_index,
@@ -358,7 +437,7 @@ def run_fold_experiment(
         "selection_value": selection_value,
         "stg_feature_ratio": stg_feature_ratio,
         "lspin_feature_ratio": lspin_feature_ratio,
-        "lambda_value": float(lambda_value) if lambda_value is not None else np.nan,
+        "stg_lambda_value": float(stg_lambda_value) if stg_lambda_value is not None else np.nan,
         "lspin_lambda_value": float(lspin_lambda_value) if lspin_lambda_value is not None else np.nan,
         "stg_selected_features": int(stg_active_count),
         "lspin_selected_features": int(lspin_mean_active_count),
@@ -547,10 +626,18 @@ def run_dataset_experiment(
     peeling_low_auc_threshold: float = 0.70,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Run full CV experiment for one dataset."""
+    print(
+        f"[Dataset] Starting experiment | dataset={dataset_name} | n_splits={n_splits} "
+        f"| mode={feature_selection_method} | eval={evaluation_mode}"
+    )
     set_global_seed(random_state)
     stg_params = dict(stg_params or {})
     lspin_params = dict(lspin_params or {})
     etree_params = dict(etree_params or {})
+
+    # Backward-compatible normalization: accept both spellings.
+    if feature_selection_method == "lambda_tuning":
+        feature_selection_method = "lamda_tuning"
 
     if feature_selection_method not in {"features_ratio", "lamda_tuning"}:
         raise ValueError("feature_selection_method must be either 'features_ratio' or 'lamda_tuning'.")
@@ -573,6 +660,8 @@ def run_dataset_experiment(
         else:
             selection_values = [(float(v), float(v)) for v in (lambda_values or [])]
 
+    print(f"[Dataset] Selection settings to run: {len(selection_values)}")
+
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     fold_rows: list[dict[str, Any]] = []
     checkpoint_df = load_checkpoint(output_dir, dataset_name)
@@ -584,42 +673,67 @@ def run_dataset_experiment(
 
     completed_keys = set()
     if not checkpoint_df.empty:
-        completed_keys = {
-            checkpoint_key(
-                row.dataset,
-                str(row.feature_selection_method),
-                str(row.selection_value),
-                int(row.fold),
+        for row in checkpoint_df.itertuples(index=False):
+            method = str(getattr(row, "feature_selection_method"))
+            raw_selection = getattr(row, "selection_value", None)
+            parsed_selection, parsed_stg_lambda, parsed_lspin_lambda = _parse_legacy_selection(raw_selection, method)
+
+            stg_lambda_for_key = getattr(row, "stg_lambda_value", parsed_stg_lambda)
+            lspin_lambda_for_key = getattr(row, "lspin_lambda_value", parsed_lspin_lambda)
+
+            completed_keys.add(
+                checkpoint_key(
+                    row.dataset,
+                    method,
+                    int(row.fold),
+                    selection_value=parsed_selection,
+                    stg_lambda_value=stg_lambda_for_key,
+                    lspin_lambda_value=lspin_lambda_for_key,
+                )
             )
-            for row in checkpoint_df.itertuples(index=False)
-        }
+
         fold_rows.extend(checkpoint_df.to_dict(orient="records"))
         print(f"Resuming {dataset_name} from {len(completed_keys)} completed jobs")
 
     stg_enabled = True
     lspin_enabled = True
 
-    for selection_value in selection_values:
+    for selection_idx, selection_value in enumerate(selection_values, start=1):
         if not stg_enabled and not lspin_enabled:
             print(f"Early stopping lambda tuning for {dataset_name}: both selectors reached zero features")
             break
 
         if feature_selection_method == "lamda_tuning":
+            print(
+                f"[Dataset] Setting {selection_idx}/{len(selection_values)} | "
+                f"STG lambda={selection_value[0]:.6g}, LSPIN lambda={selection_value[1]:.6g}"
+            )
             stg_lambda_value, lspin_lambda_value = selection_value
-            lambda_value = float(stg_lambda_value)
-            selection_key = f"stg={float(stg_lambda_value):.6g}|lspin={float(lspin_lambda_value):.6g}"
+            row_selection_value = float(stg_lambda_value)
             ratio = None
         else:
-            lambda_value = None
+            print(
+                f"[Dataset] Setting {selection_idx}/{len(selection_values)} | "
+                f"feature_ratio={selection_value:.6g}"
+            )
+            stg_lambda_value = None
             lspin_lambda_value = None
             ratio = float(selection_value)
-            selection_key = f"ratio={ratio:.6g}"
+            row_selection_value = ratio
 
         k = ratio_to_k(p, ratio) if ratio is not None else None
 
         for fold_index, (train_idx, test_idx) in enumerate(cv.split(X, y_encoded), start=1):
-            current_key = checkpoint_key(dataset_name, feature_selection_method, selection_key, fold_index)
+            current_key = checkpoint_key(
+                dataset_name,
+                feature_selection_method,
+                fold_index,
+                selection_value=row_selection_value,
+                stg_lambda_value=stg_lambda_value,
+                lspin_lambda_value=lspin_lambda_value,
+            )
             if current_key in completed_keys:
+                print(f"[Fold {fold_index}] Skipping (checkpoint hit)")
                 continue
 
             row = run_fold_experiment(
@@ -634,12 +748,12 @@ def run_dataset_experiment(
                 lspin_params=lspin_params,
                 etree_params=etree_params,
                 feature_selection_method=feature_selection_method,
-                selection_value=selection_key,
+                selection_value=row_selection_value,
                 device=device,
                 cache_dir=cache_dir,
                 model_dir=model_dir,
                 k=k,
-                lambda_value=lambda_value,
+                stg_lambda_value=stg_lambda_value,
                 lspin_lambda_value=lspin_lambda_value,
                 run_stg=stg_enabled and run_stg,
                 run_lspin=lspin_enabled and run_lspin,
@@ -652,25 +766,41 @@ def run_dataset_experiment(
             )
             fold_rows.append(row)
             save_checkpoint(output_dir, dataset_name, pd.DataFrame(fold_rows))
+            print(f"[Fold {fold_index}] Checkpoint saved.")
 
         if feature_selection_method == "lamda_tuning":
-            current_folds = [row for row in fold_rows if row["selection_value"] == selection_key]
+            current_folds = [
+                row
+                for row in fold_rows
+                if float(row.get("stg_lambda_value",  np.nan)) == float(stg_lambda_value)
+                and float(row.get("lspin_lambda_value", np.nan)) == float(lspin_lambda_value)
+            ]
             if len(current_folds) == n_splits:
                 if stg_enabled:
                     stg_k_avg = np.mean([row["stg_selected_features"] for row in current_folds])
                     if stg_k_avg <= 0:
-                        print(f"Disabling STG for higher lambdas after {selection_key}")
+                        print(
+                            "Disabling STG for higher lambdas after "
+                            f"stg={float(stg_lambda_value):.6g}|lspin={float(lspin_lambda_value):.6g}"
+                        )
                         stg_enabled = False
 
                 if lspin_enabled:
                     lspin_k_avg = np.mean([row["lspin_selected_features"] for row in current_folds])
                     if lspin_k_avg <= 0:
-                        print(f"Disabling LSPIN for higher lambdas after {selection_key}")
+                        print(
+                            "Disabling LSPIN for higher lambdas after "
+                            f"stg={float(stg_lambda_value):.6g}|lspin={float(lspin_lambda_value):.6g}"
+                        )
                         lspin_enabled = False
 
     fold_df = pd.DataFrame(fold_rows)
     loss_history_df = expand_loss_histories(fold_df)
     summary_df = summarize_fold_results(fold_df)
+    print(
+        f"[Dataset] Complete | rows={len(fold_df)} | summary_rows={len(summary_df)} "
+        f"| loss_rows={len(loss_history_df)}"
+    )
     return summary_df, fold_df, loss_history_df
 
 

@@ -21,6 +21,7 @@ def build_dataset_paths(data_root: Path) -> dict[str, Path]:
         "colon": data_root / "Standard Difficulty Data Collections" / "scikit-feature" / "colon.mat",
         "leukemia": data_root / "Standard Difficulty Data Collections" / "scikit-feature" / "leukemia.mat",
         "RELATHE": data_root / "Standard Difficulty Data Collections" / "scikit-feature" / "RELATHE.mat",
+        "Synthetic": data_root / "spiked_covariance_dataset(200,5000,50).npz",
     }
 
 
@@ -46,11 +47,28 @@ def _load_mat_xy(mat_path: Path) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(X), np.asarray(y).reshape(-1)
 
 
+def _load_npz_xy(npz_path: Path) -> tuple[np.ndarray, np.ndarray]:
+    with np.load(npz_path, allow_pickle=False) as npz:
+        feature_keys = ("X", "x", "data", "features")
+        label_keys = ("y", "Y", "labels", "target", "targets")
+
+        X = next((npz[k] for k in feature_keys if k in npz), None)
+        y = next((npz[k] for k in label_keys if k in npz), None)
+
+        if X is None or y is None:
+            raise KeyError(f"Could not find feature/label keys in {npz_path.name}")
+
+        return np.asarray(X), np.asarray(y).reshape(-1)
+
+
 def load_dataset_xy(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Load dataset from disk, currently supporting .mat files."""
-    if path.suffix.lower() != ".mat":
-        raise ValueError(f"Unsupported dataset format: {path.name}. Only .mat files are supported.")
-    return _load_mat_xy(path)
+    """Load dataset from disk, supporting .mat and .npz files."""
+    suffix = path.suffix.lower()
+    if suffix == ".mat":
+        return _load_mat_xy(path)
+    if suffix == ".npz":
+        return _load_npz_xy(path)
+    raise ValueError(f"Unsupported dataset format: {path.name}. Only .mat and .npz files are supported.")
 
 
 def load_available_datasets(dataset_paths: dict[str, Path]) -> tuple[dict[str, tuple[np.ndarray, np.ndarray]], list[str]]:

@@ -67,6 +67,7 @@ def fit_prediction_model(
     model_dir: Path,
 ):
     """Fit a downstream model selected by prediction_model_type."""
+    print(f"Fitting prediction model of type '{prediction_model_type}'")
     if prediction_model_type == "etree":
         etree_params_local = dict(etree_params)
         etree_params_local.setdefault("n_estimators", 200)

@@ -101,8 +101,8 @@ def plot_loss_curves(dataset_name, loss_part, plots_dir, suffix):
 
 def plot_lambda_tuning_features(dataset_name, part, plots_dir):
     """Generate and save selected features vs lambda plot."""
-    stg_lambdas = part["lambda_value"]
-    lspin_lambdas = part.get("lspin_lambda_value", part["lambda_value"])
+    stg_lambdas = part["stg_lambda_value"]
+    lspin_lambdas = part.get("lspin_lambda_value", part["stg_lambda_value"])
     
     # Selected Features Plot
     fig_sel, axes_sel = plt.subplots(1, 2, figsize=(16, 6))
@@ -144,7 +144,7 @@ def plot_metrics(dataset_name: str, summary_df: pd.DataFrame, loss_df: pd.DataFr
         x_scale = "linear"
         suffix = "feature_ratio"
     else:
-        sort_col = "lambda_value"
+        sort_col = "stg_lambda_value"
         x_label = "Number of Selected Features (Gate > 0)"
         x_scale = "linear"
         suffix = "num_features"

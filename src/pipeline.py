@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pandas as pd
@@ -20,7 +19,9 @@ def run_pipeline(base_dir: Path | None = None, config: ExperimentConfig | None =
     """Run the full experiment pipeline and return output artifact paths."""
     config = config or ExperimentConfig()
     if config.resume_output_dir:
-        os.environ["THESIS_OUTPUT_DIR"] = str(Path(config.resume_output_dir).expanduser().resolve())
+        checkpoint_source = Path(config.resume_output_dir).expanduser().resolve()
+        print(f"Checkpoint source directory: {checkpoint_source}")
+        print("A new output directory will be created for this run; existing outputs are left untouched.")
 
     paths = resolve_paths(base_dir=base_dir)
 
@@ -91,6 +92,7 @@ def run_pipeline(base_dir: Path | None = None, config: ExperimentConfig | None =
     single_split_selector_set = selector_set - cv_selector_set
 
     for dataset_name, dataset in selected.items():
+        print(f"\n=== Running experiments for dataset: {dataset_name} ===")
         X_data, _ = extract_xy(dataset)
         stg_params, lspin_params, etree_params = get_hyperparameters(dataset_name, len(X_data))
 

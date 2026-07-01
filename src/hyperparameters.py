@@ -13,7 +13,7 @@ def get_hyperparameters(dataset_name: str, n_train_samples: int) -> tuple[dict[s
     _ = n_train_samples
     name = str(dataset_name).strip().lower()
 
-    lss_datasets = {"breast", "colon", "leukemia", "smk-can-187"}
+    lss_datasets = {"breast", "colon", "leukemia", "smk-can-187", "synthetic", "syntetic"}
     med_large_datasets = {"madelon", "relathe"}
 
     if name in lss_datasets:
@@ -82,7 +82,7 @@ def get_hyperparameters(dataset_name: str, n_train_samples: int) -> tuple[dict[s
     else:
         raise ValueError(
             f"Unknown dataset '{dataset_name}'. "
-            "Expected one of: Breast, colon, leukemia, SMK-CAN-187, madelon, RELATHE."
+            "Expected one of: Breast, colon, leukemia, SMK-CAN-187, madelon, RELATHE, Synthetic."
         )
 
     etree_params = {"n_estimators": 100, "max_depth": 1}
