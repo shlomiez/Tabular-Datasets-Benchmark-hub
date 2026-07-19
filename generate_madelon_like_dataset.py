@@ -137,8 +137,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--n-samples", type=int, default=200)
     parser.add_argument("--n-features", type=int, default=5000)
     parser.add_argument("--n-informative", type=int, default=5)
-    parser.add_argument("--n-redundant", type=int, default=15)
-    parser.add_argument("--n-repeated", type=int, default=0)
+    parser.add_argument("--n-redundant", type=int, default=20)
+    parser.add_argument("--n-repeated", type=int, default=25)
     parser.add_argument("--n-classes", type=int, default=2)
     parser.add_argument("--n-clusters-per-class", type=int, default=2)
     parser.add_argument(
