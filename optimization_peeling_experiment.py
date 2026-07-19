@@ -5,8 +5,8 @@ This script compares two meta-heuristics over a binary selection vector w:
 - Simulated Annealing (SA)
 - Genetic Algorithm (GA)
 
-The objective minimizes validation AUC from an ExtraTrees classifier while
-enforcing hard constraints through penalties.
+The objective minimizes subset size while enforcing hard-dataset constraints
+through large penalties.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ class EvalResult:
     cost: float
     auc_all: float
     auc_gt: float
+    hardness_penalty: float
     size_penalty: float
     balance_penalty: float
     gt_penalty: float
@@ -46,7 +47,7 @@ class EvalResult:
 
     @property
     def total_penalty(self) -> float:
-        return self.size_penalty + self.balance_penalty + self.gt_penalty
+        return self.hardness_penalty + self.size_penalty + self.balance_penalty + self.gt_penalty
 
     @property
     def is_feasible(self) -> bool:
@@ -270,6 +271,7 @@ def build_evaluator(
     gt_indices: np.ndarray,
 ):
     cache: dict[bytes, EvalResult] = {}
+    penalty_mult = 1000.0
 
     def evaluate_subset(w: np.ndarray) -> EvalResult:
         w = np.asarray(w, dtype=np.uint8)
@@ -282,12 +284,13 @@ def build_evaluator(
 
         if selected_size == 0:
             result = EvalResult(
-                cost=100.0,
+                cost=5.0 * penalty_mult,
                 auc_all=0.5,
                 auc_gt=0.5,
-                size_penalty=10.0,
-                balance_penalty=10.0,
-                gt_penalty=10.0,
+                hardness_penalty=0.0,
+                size_penalty=penalty_mult * 50.0,
+                balance_penalty=penalty_mult * 0.40,
+                gt_penalty=penalty_mult * 0.40,
                 selected_size=0,
                 positive_ratio=0.0,
                 minority_ratio=0.0,
@@ -301,21 +304,27 @@ def build_evaluator(
         positive_ratio = float(np.mean(y_sub == 1))
         minority_ratio = min(positive_ratio, 1.0 - positive_ratio)
 
-        size_penalty = 10.0 if selected_size < 50 else 0.0
-        balance_penalty = 10.0 if minority_ratio < 0.40 else 0.0
-
         auc_all = fit_etree_auc(X_sub, y_sub, X_test, y_test)
         auc_gt = fit_etree_auc(X_sub[:, gt_indices], y_sub, X_test[:, gt_indices], y_test)
 
-        gt_gap = max(0.0, 0.90 - auc_gt)
-        gt_penalty = 10.0 * gt_gap
+        hardness_penalty = penalty_mult * max(0.0, auc_all - 0.70)
+        gt_penalty = penalty_mult * max(0.0, 0.90 - auc_gt)
+        size_penalty = penalty_mult * max(0.0, 50.0 - float(selected_size))
+        balance_penalty = penalty_mult * max(0.0, 0.40 - minority_ratio)
 
-        cost = float(auc_all + size_penalty + balance_penalty + gt_penalty)
+        cost = float(
+            float(selected_size)
+            + hardness_penalty
+            + gt_penalty
+            + size_penalty
+            + balance_penalty
+        )
 
         result = EvalResult(
             cost=cost,
             auc_all=float(auc_all),
             auc_gt=float(auc_gt),
+            hardness_penalty=float(hardness_penalty),
             size_penalty=size_penalty,
             balance_penalty=balance_penalty,
             gt_penalty=float(gt_penalty),
@@ -374,7 +383,7 @@ def optimize_simulated_annealing(
             best_eval = candidate_eval
 
         if candidate_eval.is_feasible:
-            if best_feasible_eval is None or candidate_eval.auc_all < best_feasible_eval.auc_all:
+            if best_feasible_eval is None or candidate_eval.cost < best_feasible_eval.cost:
                 best_feasible_w = candidate_w.copy()
                 best_feasible_eval = candidate_eval
 
@@ -439,7 +448,7 @@ def optimize_genetic_algorithm(
     best_feasible_eval = None
     for ind, ind_eval in zip(pop, evals):
         if ind_eval.is_feasible:
-            if best_feasible_eval is None or ind_eval.auc_all < best_feasible_eval.auc_all:
+            if best_feasible_eval is None or ind_eval.cost < best_feasible_eval.cost:
                 best_feasible_w = ind.copy()
                 best_feasible_eval = ind_eval
 
@@ -477,7 +486,7 @@ def optimize_genetic_algorithm(
 
         for ind, ind_eval in zip(pop, evals):
             if ind_eval.is_feasible:
-                if best_feasible_eval is None or ind_eval.auc_all < best_feasible_eval.auc_all:
+                if best_feasible_eval is None or ind_eval.cost < best_feasible_eval.cost:
                     best_feasible_w = ind.copy()
                     best_feasible_eval = ind_eval
 
@@ -497,6 +506,7 @@ def summarize_result(result: OptimizerResult) -> dict[str, float | int | str | b
         "auc_all": best.auc_all,
         "auc_gt": best.auc_gt,
         "cost": best.cost,
+        "hardness_penalty": best.hardness_penalty,
         "size_penalty": best.size_penalty,
         "balance_penalty": best.balance_penalty,
         "gt_penalty": best.gt_penalty,
@@ -511,11 +521,19 @@ def summarize_result(result: OptimizerResult) -> dict[str, float | int | str | b
 def print_method_report(result: OptimizerResult) -> None:
     best = result.best_eval
     print(f"\n[{result.method}] Best subset report")
+    print(f"  cost           : {best.cost:.4f}")
+    print(f"  objective(size): {best.selected_size}")
     print(f"  auc_all        : {best.auc_all:.4f}")
     print(f"  auc_gt         : {best.auc_gt:.4f}")
     print(f"  selected_size  : {best.selected_size}")
     print(f"  positive_ratio : {best.positive_ratio:.4f}")
-    print(f"  penalties      : size={best.size_penalty:.4f}, balance={best.balance_penalty:.4f}, gt={best.gt_penalty:.4f}")
+    print(
+        "  penalties      : "
+        f"hardness={best.hardness_penalty:.4f}, "
+        f"size={best.size_penalty:.4f}, "
+        f"balance={best.balance_penalty:.4f}, "
+        f"gt={best.gt_penalty:.4f}"
+    )
     print(f"  feasible       : {best.is_feasible}")
 
 
@@ -527,11 +545,15 @@ def compare_methods(sa_result: OptimizerResult, ga_result: OptimizerResult) -> t
     ga_feasible = ga_best.is_feasible
 
     if sa_feasible and ga_feasible:
+        if sa_best.cost < ga_best.cost:
+            return sa_result.method, "Both best solutions are feasible; SA has lower size-first cost."
+        if ga_best.cost < sa_best.cost:
+            return ga_result.method, "Both best solutions are feasible; GA has lower size-first cost."
         if sa_best.auc_all < ga_best.auc_all:
-            return sa_result.method, "Both best solutions are feasible; SA has lower auc_all."
+            return sa_result.method, "Both best solutions are feasible with equal cost; SA has lower auc_all."
         if ga_best.auc_all < sa_best.auc_all:
-            return ga_result.method, "Both best solutions are feasible; GA has lower auc_all."
-        return "Tie", "Both best solutions are feasible with equal auc_all."
+            return ga_result.method, "Both best solutions are feasible with equal cost; GA has lower auc_all."
+        return "Tie", "Both best solutions are feasible with equal cost and auc_all."
 
     if sa_feasible and not ga_feasible:
         return sa_result.method, "Only SA best solution is feasible (GA best has penalties)."
@@ -540,11 +562,11 @@ def compare_methods(sa_result: OptimizerResult, ga_result: OptimizerResult) -> t
         return ga_result.method, "Only GA best solution is feasible (SA best has penalties)."
 
     if sa_result.best_feasible_eval is not None and ga_result.best_feasible_eval is not None:
-        if sa_result.best_feasible_eval.auc_all < ga_result.best_feasible_eval.auc_all:
-            return sa_result.method, "Neither global best is feasible; SA has better feasible solution encountered."
-        if ga_result.best_feasible_eval.auc_all < sa_result.best_feasible_eval.auc_all:
-            return ga_result.method, "Neither global best is feasible; GA has better feasible solution encountered."
-        return "Tie", "Neither global best is feasible; both methods found equal feasible auc_all."
+        if sa_result.best_feasible_eval.cost < ga_result.best_feasible_eval.cost:
+            return sa_result.method, "Neither global best is feasible; SA has better feasible size-first solution encountered."
+        if ga_result.best_feasible_eval.cost < sa_result.best_feasible_eval.cost:
+            return ga_result.method, "Neither global best is feasible; GA has better feasible size-first solution encountered."
+        return "Tie", "Neither global best is feasible; both methods found equal feasible cost."
 
     if sa_result.best_feasible_eval is not None and ga_result.best_feasible_eval is None:
         return sa_result.method, "Neither global best is feasible; only SA found at least one feasible solution."
