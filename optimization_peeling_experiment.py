@@ -180,9 +180,17 @@ def recover_gt_indices_from_fs(
         return np.arange(n_features, dtype=np.int64)
 
     k = max(1, min(max_k, n_features))
-    best_auc = -1.0
-    best_indices = np.arange(n_features, dtype=np.int64)
+    _, best_indices, _ = select_best_fs_subset(X_train, y_train, X_test, y_test, seed, k)
+    return best_indices
 
+
+def build_candidate_feature_selectors(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    seed: int,
+    k: int,
+) -> list[tuple[str, np.ndarray]]:
+    """Return (name, feature_indices) candidates from several feature selectors."""
     selectors: list[tuple[str, np.ndarray]] = []
 
     skb_f = SelectKBest(score_func=f_classif, k=k)
@@ -209,7 +217,27 @@ def recover_gt_indices_from_fs(
     svc_idx = np.argsort(svc_scores)[-k:]
     selectors.append(("linear_svc_l1", np.sort(svc_idx.astype(np.int64))))
 
-    for _, idx in selectors:
+    return selectors
+
+
+def select_best_fs_subset(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    seed: int,
+    k: int,
+) -> tuple[float, np.ndarray, str]:
+    """Try several feature selectors and return the (auc, indices, name) of the best one."""
+    n_features = X_train.shape[1]
+    best_auc = -1.0
+    best_indices = np.arange(n_features, dtype=np.int64)
+    best_name = "none"
+
+    if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
+        return 0.5, best_indices, best_name
+
+    for name, idx in build_candidate_feature_selectors(X_train, y_train, seed, k):
         idx = np.asarray(idx, dtype=np.int64)
         if idx.size == 0:
             continue
@@ -217,8 +245,9 @@ def recover_gt_indices_from_fs(
         if auc > best_auc:
             best_auc = auc
             best_indices = idx
+            best_name = name
 
-    return np.unique(best_indices.astype(np.int64))
+    return best_auc, np.unique(best_indices.astype(np.int64)), best_name
 
 
 def split_pool_test(
@@ -555,6 +584,67 @@ def compare_methods(sa_result: OptimizerResult, ga_result: OptimizerResult) -> t
     return "No feasible winner", "No feasible solution found by either optimizer under current budget."
 
 
+def build_hardening_comparison_rows(
+    X_pool: np.ndarray,
+    y_pool: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    gt_indices: np.ndarray,
+    sa_result: OptimizerResult,
+    ga_result: OptimizerResult,
+    seed: int,
+) -> list[dict[str, float | int | str]]:
+    """Build a per-method comparison table of AUC (all features / FS / ground truth)."""
+    fs_k = max(1, min(gt_indices.size, X_pool.shape[1]))
+
+    def make_row(name: str, w: np.ndarray | None) -> dict[str, float | int | str]:
+        if w is None:
+            X_sub, y_sub = X_pool, y_pool
+        else:
+            selected = np.flatnonzero(np.asarray(w, dtype=np.uint8))
+            X_sub, y_sub = X_pool[selected], y_pool[selected]
+
+        auc_all = fit_etree_auc(X_sub, y_sub, X_test, y_test)
+        auc_fs, _, _ = select_best_fs_subset(X_sub, y_sub, X_test, y_test, seed, fs_k)
+        auc_gt = fit_etree_auc(X_sub[:, gt_indices], y_sub, X_test[:, gt_indices], y_test)
+
+        return {
+            "Hardening Method": name,
+            "Dataset Size (N)": int(X_sub.shape[0]),
+            "AUC All Features": auc_all,
+            "AUC with FS": auc_fs,
+            "AUC Ground Truth": auc_gt,
+        }
+
+    return [
+        make_row("Initial (No Hardening)", None),
+        make_row(sa_result.method, sa_result.best_w),
+        make_row(ga_result.method, ga_result.best_w),
+    ]
+
+
+def save_hardening_comparison_csv(
+    output_dir: Path,
+    rows: list[dict[str, float | int | str]],
+    timestamp: str,
+) -> Path:
+    ensure_dir(output_dir)
+    csv_path = output_dir / f"hardening_comparison_{timestamp}.csv"
+    fieldnames = [
+        "Hardening Method",
+        "Dataset Size (N)",
+        "AUC All Features",
+        "AUC with FS",
+        "AUC Ground Truth",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return csv_path
+
+
 def save_artifacts(
     output_dir: Path,
     args: argparse.Namespace,
@@ -562,9 +652,9 @@ def save_artifacts(
     ga_result: OptimizerResult,
     winner: str,
     winner_reason: str,
+    timestamp: str,
 ) -> tuple[Path, Path]:
     ensure_dir(output_dir)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     csv_path = output_dir / f"optimization_peeling_summary_{timestamp}.csv"
     json_path = output_dir / f"optimization_peeling_summary_{timestamp}.json"
@@ -662,6 +752,8 @@ def main() -> None:
     print(f"  winner : {winner}")
     print(f"  reason : {winner_reason}")
 
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
     csv_path, json_path = save_artifacts(
         output_dir=output_dir,
         args=args,
@@ -669,11 +761,30 @@ def main() -> None:
         ga_result=ga_result,
         winner=winner,
         winner_reason=winner_reason,
+        timestamp=timestamp,
+    )
+
+    print("\nBuilding hardening comparison table (Initial / SA / GA)...")
+    hardening_rows = build_hardening_comparison_rows(
+        X_pool=X_pool,
+        y_pool=y_pool,
+        X_test=X_test,
+        y_test=y_test,
+        gt_indices=gt_indices,
+        sa_result=sa_result,
+        ga_result=ga_result,
+        seed=args.seed,
+    )
+    hardening_csv_path = save_hardening_comparison_csv(
+        output_dir=output_dir,
+        rows=hardening_rows,
+        timestamp=timestamp,
     )
 
     print("\nSaved artifacts")
-    print(f"  csv  : {csv_path}")
-    print(f"  json : {json_path}")
+    print(f"  csv                : {csv_path}")
+    print(f"  json               : {json_path}")
+    print(f"  hardening csv      : {hardening_csv_path}")
 
 
 if __name__ == "__main__":
