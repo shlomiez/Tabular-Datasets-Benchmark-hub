@@ -144,8 +144,8 @@ def _empirical_snr(signal: np.ndarray, sigma: float, noise: np.ndarray) -> float
     return signal_power / noise_power
 
 
-def _default_output_name(n_samples: int, p_features: int, n_active_features: int) -> str:
-    return f"spiked_covariance_dataset({n_samples},{p_features},{n_active_features}).npz"
+def _default_output_name(n_samples: int, p_features: int, n_active_features: int, snr: float) -> str:
+    return f"spiked_covariance_dataset({n_samples},{p_features},{n_active_features},snr{snr:g}).npz"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -205,7 +205,7 @@ def main() -> None:
     if args.output:
         out_path = Path(args.output).expanduser().resolve()
     else:
-        out_name = _default_output_name(args.n_samples, args.p_features, args.n_active_features)
+        out_name = _default_output_name(args.n_samples, args.p_features, args.n_active_features, args.snr)
         out_path = (Path("data") / out_name).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
